@@ -115,6 +115,10 @@ fn reloc_class(k: RelocKind) -> u8 {
     match k {
         RelocKind::BranchRel32 | RelocKind::RipRel32 => 0,
         RelocKind::Abs64 => 1,
+        // AArch64 reloc classes (the AArch64 corpus reuses this codec).
+        RelocKind::Branch26 => 2,
+        RelocKind::AdrpPage21 => 3,
+        RelocKind::AddPageOff12 => 4,
     }
 }
 
@@ -324,6 +328,9 @@ fn kind_str(k: RelocKind) -> &'static str {
     match k {
         RelocKind::Abs64 => "abs64",
         RelocKind::BranchRel32 | RelocKind::RipRel32 => "rel32",
+        RelocKind::Branch26 => "branch26",
+        RelocKind::AdrpPage21 => "adrp_page21",
+        RelocKind::AddPageOff12 => "add_pageoff12",
     }
 }
 
@@ -365,6 +372,9 @@ pub fn parse_corpus_line(line: &str) -> Option<(String, EncodedModule)> {
                 let kind = match p.next()? {
                     "rel32" => RelocKind::BranchRel32,
                     "abs64" => RelocKind::Abs64,
+                    "branch26" => RelocKind::Branch26,
+                    "adrp_page21" => RelocKind::AdrpPage21,
+                    "add_pageoff12" => RelocKind::AddPageOff12,
                     _ => return None,
                 };
                 let target = p.next()?.to_string();

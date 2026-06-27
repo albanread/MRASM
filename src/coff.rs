@@ -162,6 +162,9 @@ pub fn write_coff(m: &EncodedModule) -> Vec<u8> {
             // disp field, so the linker measures relative to the instruction end.
             RelocKind::RipRel32 => IMAGE_REL_AMD64_REL32 + (-r.addend) as u16,
             RelocKind::Abs64 => IMAGE_REL_AMD64_ADDR64,
+            RelocKind::Branch26 | RelocKind::AdrpPage21 | RelocKind::AddPageOff12 => {
+                panic!("AArch64 reloc {:?} to '{}' has no COFF/AMD64 mapping (use the Mach-O writer)", r.kind, r.target)
+            }
         };
         out.extend_from_slice(&(r.at as u32).to_le_bytes()); // VirtualAddress
         out.extend_from_slice(&index[&r.target].to_le_bytes()); // SymbolTableIndex

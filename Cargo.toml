@@ -1,9 +1,9 @@
 [workspace]
-members = [".", "crates/winkb", "crates/was", "crates/ide", "crates/studio"]
-# The self-contained core (no external repos): a fresh clone builds these with a
-# bare `cargo build`. `studio` is excluded from the default set because it
-# path-deps WF66's docpane (the Direct2D render core); build it explicitly with
-# `cargo build -p studio` when WF66 is checked out alongside, or `--workspace`.
+# MRASM (macOS arm64 port): `studio` is dropped from the workspace entirely for
+# now — it path-deps WF66's `docpane` (a Direct2D/DirectWrite render core) and
+# `doccrate/rust-tcl`, both Windows-only. The Mac IDE shell will be re-added once
+# a macOS render core (the WF66->MF66 / MacNCL line) is wired up. See mrasm-port.
+members = [".", "crates/winkb", "crates/was", "crates/ide"]
 default-members = [".", "crates/winkb", "crates/was", "crates/ide"]
 resolver = "2"
 
@@ -17,6 +17,14 @@ license = "MIT"
 [[bin]]
 name = "rasm-as"
 path = "src/bin/rasm_as.rs"
+
+[features]
+# The AArch64 encoder's `oracle_diff` gate (src/a64) compares byte-for-byte
+# against an LLVM-MC oracle, exactly like the x86 corpus was built. The oracle
+# module is not yet ported into MRASM, so this feature is a declared placeholder
+# (silences the cfg warning) — enabling it will not compile until the oracle and
+# AArch64 corpus land. See mrasm-port.
+llvm = []
 
 [dependencies]
 anyhow = "1"

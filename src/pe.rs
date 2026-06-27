@@ -181,6 +181,9 @@ pub fn write_pe(
                 text[r.at..r.at + 4].copy_from_slice(&(disp as i32).to_le_bytes());
             }
             RelocKind::Abs64 => bail!("abs64 reloc to '{}' unsupported in PE writer", r.target),
+            RelocKind::Branch26 | RelocKind::AdrpPage21 | RelocKind::AddPageOff12 => {
+                bail!("AArch64 reloc {:?} to '{}' unsupported in PE writer (use the Mach-O writer)", r.kind, r.target)
+            }
         }
     }
 
