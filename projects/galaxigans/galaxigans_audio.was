@@ -1,0 +1,206 @@
+; galaxigans_audio.was — SFX bake/playback + the ABC soundtrack (.CODE + .DATA).
+;
+; AudioInit must run before any Play (it starts the waveOut mixer thread). Every preset
+; (Zap/Explode/...) renders into the ONE shared library buffer `sndBuf` and sets
+; `sndFrames` — so each must be CopySfx'd into a private buffer IMMEDIATELY, before the
+; next preset overwrites sndBuf. `sndBuf`/`sndFrames`/`gMusicLoop` are .globl library
+; symbols (resolve across `module Galaxigans`). CopySfx is AUTHOR-OWNED — verbatim from
+; brickout_fx.was:231. `.balign 16` guards EACH real8 buffer (data-alignment trap).
+
+module Galaxigans
+.balign 16
+.DATA
+.balign 16
+zapBuf      real8 88200 dup(0.0)              ; fire SFX (short Zap)
+zapFrames   DWORD ?
+.balign 16
+boomBuf     real8 88200 dup(0.0)              ; enemy-kill SFX (punchy Explode)
+boomFrames  DWORD ?
+.balign 16
+deathBuf    real8 88200 dup(0.0)              ; player-death SFX (long deep Explode)
+deathFrames DWORD ?
+.balign 16
+wahBuf      real8 88200 dup(0.0)              ; saucer UFO warble (looped while it crosses)
+wahFrames   DWORD ?
+.balign 16
+bossHumBuf  real8 88200 dup(0.0)              ; capture boss: low menacing tractor hum
+bossHumFrames DWORD ?
+.balign 16
+captureBuf  real8 88200 dup(0.0)              ; a pilot abducted: descending loss zap
+captureFrames DWORD ?
+.balign 16
+bonusBuf    real8 88200 dup(0.0)              ; boss shot free: bonus chime
+bonusFrames DWORD ?
+.balign 16
+warnBuf     real8 88200 dup(0.0)              ; boss-arrival klaxon (fast warble)
+warnFrames  DWORD ?
+
+; looping A-minor chiptune (square lead + synth bass) — brickout's proven soundtrack.
+soundtrack BYTE "X:1", 10, "M:4/4", 10, "L:1/8", 10, "Q:1/4=170", 10, "%%MIDI program 1 81", 10, "%%MIDI program 2 38", 10, "K:Em", 10, "V:1", 10, "e g b e' b g e g | d f a d' a f d f | c e g c' g e c e | B d f b a g f e | e g b e' b g e g | d f a d' a f d f | c e a c' a e c B | e2 B2 e4 |", 10, "V:2", 10, "E,4 B,,4 | D,4 A,,4 | C,4 G,,4 | B,,4 E,4 | E,4 B,,4 | D,4 A,,4 | C,4 G,,4 | E,4 E,4 |", 10, 0
+
+.balign 16
+.CODE
+
+; ---- AudioBoot: mixer up, the three SFX pre-rendered, the looping soundtrack started ----
+proc AudioBoot frame
+    call    AudioInit                         ; waveOut mixer thread (before any Play)
+    mov     edx, 90                           ; fire: a short bright zap
+    call    Zap
+    lea     rcx, [rip + zapBuf]
+    lea     rdx, [rip + zapFrames]
+    call    CopySfx
+    mov     edx, 320                          ; enemy kill: a punchy explode
+    call    Explode
+    lea     rcx, [rip + boomBuf]
+    lea     rdx, [rip + boomFrames]
+    call    CopySfx
+    mov     edx, 800                          ; player death: a long deep detonation
+    call    Explode
+    lea     rcx, [rip + deathBuf]
+    lea     rdx, [rip + deathFrames]
+    call    CopySfx
+    mov     ecx, 280                          ; saucer warble: 280 Hz + 5 Hz detune -> ~5/s "wah"
+    mov     edx, 900
+    mov     r8d, 5
+    call    Wah
+    lea     rcx, [rip + wahBuf]
+    lea     rdx, [rip + wahFrames]
+    call    CopySfx
+    mov     ecx, 110                          ; boss hum: low 110 Hz + 4 Hz detune, ominous throb
+    mov     edx, 1100
+    mov     r8d, 4
+    call    Wah
+    lea     rcx, [rip + bossHumBuf]
+    lea     rdx, [rip + bossHumFrames]
+    call    CopySfx
+    mov     edx, 360                          ; pilot captured: a long descending zap
+    call    Zap
+    lea     rcx, [rip + captureBuf]
+    lea     rdx, [rip + captureFrames]
+    call    CopySfx
+    mov     edx, 220                          ; boss freed: a bright bonus chime
+    call    Coin
+    lea     rcx, [rip + bonusBuf]
+    lea     rdx, [rip + bonusFrames]
+    call    CopySfx
+    mov     ecx, 330                          ; boss klaxon: 330 Hz + 14 Hz detune -> alarm warble
+    mov     edx, 800
+    mov     r8d, 14
+    call    Wah
+    lea     rcx, [rip + warnBuf]
+    lea     rdx, [rip + warnFrames]
+    call    CopySfx
+    mov     dword ptr [rip + gMusicLoop], 1   ; loop the active tune
+    lea     rcx, [rip + tuneTitle]            ; boot into STATE_INTRO -> title music
+    call    ParseTune                         ; ABC -> the scheduled event array
+    call    MusicInit                         ; open MIDI_MAPPER + start the player thread
+endproc
+
+; ---- AudioStop: stop + join the soundtrack and mixer threads (call on exit) ----
+proc AudioStop frame
+    call    MusicShutdown
+    call    AudioShutdown
+endproc
+
+; ---- MusicSwitch(rcx=ABC tune): stop the current tune + start a new one. The player
+;      thread reads tuneEv unlocked, so the safe switch is shutdown -> reparse -> reinit. ----
+proc MusicSwitch uses rbx frame in rcx
+    mov     rbx, rcx                          ; keep the tune ptr across MusicShutdown
+    call    MusicShutdown                     ; stop + join + close (zeroes the thread handle)
+    mov     rcx, rbx
+    call    ParseTune                         ; reparse into tuneEv
+    call    MusicInit                         ; reopen the device + restart the player
+endproc
+
+; ---- MusicGameOver: the aliens' triumph — switch to the "Alien Victory" fanfare ----
+proc MusicGameOver frame
+    lea     rcx, [rip + tuneGameOver]
+    call    MusicSwitch
+endproc
+
+; ---- MusicGameplay: the energetic gameplay loop ----
+proc MusicGameplay frame
+    lea     rcx, [rip + soundtrack]
+    call    MusicSwitch
+endproc
+
+; ---- MusicTitle: the title-screen theme ----
+proc MusicTitle frame
+    lea     rcx, [rip + tuneTitle]
+    call    MusicSwitch
+endproc
+
+; ---- MusicVictory: stage-clear "You Win!" fanfare ----
+proc MusicVictory frame
+    lea     rcx, [rip + tuneVictory]
+    call    MusicSwitch
+endproc
+
+; ---- PlayZap / PlayBoom / PlayDeath: fire a pre-rendered SFX into the mixer ----
+proc PlayZap frame
+    lea     rcx, [rip + zapBuf]
+    mov     edx, [rip + zapFrames]
+    call    Play
+endproc
+
+proc PlayBoom frame
+    lea     rcx, [rip + boomBuf]
+    mov     edx, [rip + boomFrames]
+    call    Play
+endproc
+
+proc PlayDeath frame
+    lea     rcx, [rip + deathBuf]
+    mov     edx, [rip + deathFrames]
+    call    Play
+endproc
+
+; ---- PlaySaucerWah: the UFO warble (re-triggered on a loop while the saucer crosses) ----
+proc PlaySaucerWah frame
+    lea     rcx, [rip + wahBuf]
+    mov     edx, [rip + wahFrames]
+    call    Play
+endproc
+
+proc PlayBossHum frame
+    lea     rcx, [rip + bossHumBuf]
+    mov     edx, [rip + bossHumFrames]
+    call    Play
+endproc
+
+proc PlayCapture frame
+    lea     rcx, [rip + captureBuf]
+    mov     edx, [rip + captureFrames]
+    call    Play
+endproc
+
+proc PlayBonus frame
+    lea     rcx, [rip + bonusBuf]
+    mov     edx, [rip + bonusFrames]
+    call    Play
+endproc
+
+proc PlayWarn frame
+    lea     rcx, [rip + warnBuf]
+    mov     edx, [rip + warnFrames]
+    call    Play
+endproc
+
+; ---- CopySfx(rcx=dstBuf, rdx=dstFramesPtr): the last render's sndBuf -> a private
+;      buffer + save the frame count. AUTHOR-OWNED — verbatim from brickout_fx.was. ----
+proc CopySfx uses rbx rsi rdi r12 in rcx rdx
+    mov     rdi, rcx                          ; dst
+    mov     rbx, rdx                          ; dstFramesPtr
+    mov     r12d, [rip + sndFrames]
+    mov     [rbx], r12d                       ; *dstFramesPtr = sndFrames
+    mov     ecx, r12d
+    add     ecx, ecx                          ; interleaved samples = frames*2
+    cmp     ecx, 88200                        ; clamp to the 1 s stereo buffer
+    jbe     cs_go
+    mov     ecx, 88200
+cs_go:
+    lea     rsi, [rip + sndBuf]
+    rep     movsq                             ; copy ecx f64 qwords src->dst
+endproc
+
+endmodule

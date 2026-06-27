@@ -1,0 +1,291 @@
+module Player
+; abc_note.was — ParseNotePitch (one note token -> MIDI pitch) + ParseNote.
+; Part of the abc.was shell (.CODE).
+; ----------------------------------------------------------------------------
+; ParseNotePitch -> eax = MIDI pitch (0..127).
+;   Consumes ONE note token's accidental(s) + letter + octave marks from txtPtr,
+;   resolves the effective accidental (explicit -> sets barAcc/barSet[pc]; else a
+;   bar override; else the key default), computes the clamped MIDI pitch, and
+;   advances txtPtr PAST the token but NOT past any duration.  This is the pitch
+;   half of a note token, factored out so chords can reuse it (each chord note is
+;   one pitch token; the chord's single duration is parsed once after the ']').
+;   Leaf (no calls) -> no frame.  Returns 0..127 in eax; on a non-letter it returns
+;   -1 (0xFFFFFFFF).  NOTE: it commits any accidentals it consumed before the
+;   non-letter, so on a -1 return txtPtr may have ADVANCED past ^/_/= — a caller
+;   that "steps one char" on -1 must first re-check for terminators (ParseChord does).
+;   Non-volatile use: rsi (cursor).  Bar-accidental persistence is IDENTICAL to
+;   the pre-refactor ParseNote.
+; ----------------------------------------------------------------------------
+proc ParseNotePitch uses rbx rsi r12 r13 out rax
+    mov     rsi, [rip + txtPtr]
+
+    ; --- accidental prefix: ^ ^^ _ __ = (explicit overrides; persist to bar) ---
+    ; ebx = explicit accidental value; r11d = 1 if an explicit accidental seen.
+    xor     ebx, ebx
+    xor     r11d, r11d
+pnp_acc_loop:
+    movzx   eax, byte ptr [rsi]
+    cmp     al, '^'
+    je      pnp_acc_sharp
+    cmp     al, '_'
+    je      pnp_acc_flat
+    cmp     al, '='
+    je      pnp_acc_nat
+    jmp     pnp_acc_done
+pnp_acc_sharp:
+    inc     ebx
+    mov     r11d, 1
+    inc     rsi
+    jmp     pnp_acc_loop
+pnp_acc_flat:
+    dec     ebx
+    mov     r11d, 1
+    inc     rsi
+    jmp     pnp_acc_loop
+pnp_acc_nat:
+    xor     ebx, ebx                  ; natural = 0
+    mov     r11d, 1
+    inc     rsi
+pnp_acc_done:
+
+    ; --- the note letter ---
+    ; MIDI octave convention: C4 = 60, i.e. midi = (octave+1)*12 + semitone.
+    ; ABC A-G are "octave 4" -> base multiplier 5 (=(4+1)); a-g -> 6.  So C -> 60.
+    movzx   eax, byte ptr [rsi]
+    mov     r8d, 5
+    cmp     al, 'a'
+    jb      pnp_upper
+    cmp     al, 'g'
+    ja      pnp_bail
+    mov     r8d, 6
+    sub     al, 32                    ; uppercase
+    jmp     pnp_have_letter
+pnp_upper:
+    cmp     al, 'A'
+    jb      pnp_bail
+    cmp     al, 'G'
+    ja      pnp_bail
+pnp_have_letter:
+    ; pc index = (letter-'A' + 5) mod 7   (A->5 B->6 C->0 D->1 E->2 F->3 G->4)
+    movzx   ecx, al
+    sub     ecx, 'A'
+    add     ecx, 5
+    cmp     ecx, 7
+    jb      pnp_pc_ok
+    sub     ecx, 7
+pnp_pc_ok:
+    mov     r12d, ecx                 ; pitch-class index
+    inc     rsi                       ; consume letter
+
+    ; --- octave marks ' (+12) and , (-12), stackable ---
+    xor     r13d, r13d
+pnp_oct_loop:
+    movzx   eax, byte ptr [rsi]
+    cmp     al, 0x27                  ; apostrophe  '
+    je      pnp_oct_up
+    cmp     al, 44                    ; comma  ,  (char literal ',' confuses lexer)
+    je      pnp_oct_down
+    jmp     pnp_oct_done
+pnp_oct_up:
+    add     r13d, 12
+    inc     rsi
+    jmp     pnp_oct_loop
+pnp_oct_down:
+    sub     r13d, 12
+    inc     rsi
+    jmp     pnp_oct_loop
+pnp_oct_done:
+
+    ; --- resolve the effective accidental for this pitch class ---
+    lea     r9, [rip + barAcc]
+    lea     r10, [rip + barSet]
+    mov     ecx, r12d
+    test    r11d, r11d
+    jz      pnp_acc_resolve_bar
+    mov     [r9 + rcx*4], ebx         ; explicit -> barAcc[pc] = ebx
+    mov     dword ptr [r10 + rcx*4], 1
+    mov     eax, ebx
+    jmp     pnp_acc_resolved
+pnp_acc_resolve_bar:
+    mov     edx, [r10 + rcx*4]
+    test    edx, edx
+    jz      pnp_acc_resolve_key
+    mov     eax, [r9 + rcx*4]         ; bar override
+    jmp     pnp_acc_resolved
+pnp_acc_resolve_key:
+    lea     r11, [rip + keyAcc]
+    mov     eax, [r11 + rcx*4]        ; key default
+pnp_acc_resolved:
+    mov     ebx, eax                  ; ebx = effective accidental
+
+    ; --- MIDI pitch = baseOct*12 + semitab[pc] + accidental + octaveShift ---
+    mov     eax, r8d
+    imul    eax, eax, 12
+    lea     r9, [rip + semitab]
+    mov     ecx, r12d
+    add     eax, [r9 + rcx*4]
+    add     eax, ebx
+    add     eax, r13d
+    ; clamp 0..127
+    cmp     eax, 0
+    jge     pnp_clamp_hi
+    xor     eax, eax
+pnp_clamp_hi:
+    cmp     eax, 127
+    jle     pnp_pitch_ok
+    mov     eax, 127
+pnp_pitch_ok:
+    ; eax = MIDI pitch; advance the authoritative cursor past the token
+    mov     [rip + txtPtr], rsi
+    jmp     pnp_ret
+pnp_bail:
+    mov     [rip + txtPtr], rsi       ; persist whatever was consumed (accidentals)
+    mov     eax, -1                   ; signal: not a note letter
+pnp_ret:
+endproc
+
+; ----------------------------------------------------------------------------
+; ParseNote: one full note token = pitch (ParseNotePitch) + duration, then the
+; Sprint-M-E rhythm/ornament modifiers that ride on the SAME note:
+;   tuplets `(p`  — if tupCount>0: durWholes *= tupMul, tupCount-- .
+;   broken rhythm `> <` — the pending brokenMul (from the PREVIOUS note's >/<)
+;     scales THIS note, then resets to 1.0; then a trailing >/< on THIS note
+;     scales it (x1.5 / x0.5) and arms brokenMul (0.5 / 1.5) for the NEXT note.
+;   ties `-` — a trailing `-` after the duration holds the note across the next
+;     same-pitch note: the NoteOn/NoteOff are suppressed so one sustained note
+;     spans both durations (one NoteOn, one NoteOff).
+; ALL of these scale the SAME durWholes used for BOTH the NoteOff stamp and the
+; curMs advance, so onset timing stays drift-free.
+;
+; Order of trailing markers parsed after the duration: broken `>`/`<` first,
+; then tie `-` (the common forms are `a>b` and `C-C`; `a>-b` is tolerated).
+; Only the FIRST trailing `>`/`<` on a note is honoured; any extra `>`/`<` is
+; ignored (NOT treated as a double-dot / second broken mark).
+;
+; Tie continuation rule when pitches DIFFER: if tiePend is open but THIS note's
+; pitch != tiePitch, we close the held note (emit its suppressed NoteOff) at
+; THIS note's onset, then treat THIS note normally — keeps the stream balanced.
+;
+; Calls -> frame.  Non-volatiles: rbx = pitch, r12 = thisTied flag.  durWholes
+; is parked in pnDur across the Round/Emit/Advance calls.
+; ----------------------------------------------------------------------------
+proc ParseNote uses rbx rsi r12 frame
+    call    ParseNotePitch            ; eax = pitch (txtPtr past the token)
+    cmp     eax, -1
+    je      pn_ret                    ; not a note letter -> nothing emitted
+    mov     ebx, eax                  ; ebx = MIDI pitch (survives the calls)
+
+    ; --- duration (writes txtPtr) ---
+    call    ParseDuration             ; xmm0 = durWholes, txtPtr advanced
+
+    ; --- tuplet + pending-broken scaling (shared with chords/rests) ---
+    call    ApplyRhythm               ; xmm0 *= tupMul (if active) then *= brokenMul
+
+    ; --- peek a trailing >/< on THIS note: scale it, arm brokenMul for NEXT ---
+    movsd   [rip + pnDur], xmm0        ; park durWholes across the byte peek
+    mov     rsi, [rip + txtPtr]
+    movzx   eax, byte ptr [rsi]
+    cmp     al, '>'
+    je      pn_brk_gt
+    cmp     al, '<'
+    je      pn_brk_lt
+    jmp     pn_brk_done
+pn_brk_gt:
+    ; a>b : THIS note x1.5, NEXT note x0.5
+    movsd   xmm0, [rip + pnDur]
+    mulsd   xmm0, [rip + fDot15]
+    movsd   [rip + pnDur], xmm0
+    movsd   xmm1, [rip + fDot5]
+    movsd   [rip + brokenMul], xmm1
+    inc     rsi
+    mov     [rip + txtPtr], rsi
+    jmp     pn_brk_done
+pn_brk_lt:
+    ; a<b : THIS note x0.5, NEXT note x1.5
+    movsd   xmm0, [rip + pnDur]
+    mulsd   xmm0, [rip + fDot5]
+    movsd   [rip + pnDur], xmm0
+    movsd   xmm1, [rip + fDot15]
+    movsd   [rip + brokenMul], xmm1
+    inc     rsi
+    mov     [rip + txtPtr], rsi
+pn_brk_done:
+
+    ; --- peek a trailing tie '-' on THIS note (after duration + broken mark) ---
+    xor     r12d, r12d                 ; thisTied = 0
+    mov     rsi, [rip + txtPtr]
+    movzx   eax, byte ptr [rsi]
+    cmp     al, '-'
+    jne     pn_tie_peeked
+    mov     r12d, 1                    ; thisTied = 1
+    inc     rsi
+    mov     [rip + txtPtr], rsi
+pn_tie_peeked:
+
+    ; --- decide: are we CONTINUING an open tie at the SAME pitch? ---
+    mov     eax, [rip + tiePend]
+    test    eax, eax
+    jz      pn_normal                  ; no open tie -> normal emission
+    mov     eax, [rip + tiePitch]
+    cmp     eax, ebx
+    jne     pn_tie_mismatch            ; open tie but different pitch -> close it first
+
+    ; ---- CONTINUE the held note: SUPPRESS this NoteOn (already sounding) ----
+    movsd   xmm0, [rip + pnDur]
+    call    AdvanceCurMs               ; curMs += durWholes * msPerWhole
+    test    r12d, r12d
+    jnz     pn_still_held              ; still tied -> keep tiePend, no NoteOff yet
+    ; tie ends here: emit the single NoteOff @ round(curMs), clear the tie
+    call    RoundCurMs
+    mov     ecx, eax
+    mov     edx, 0x80                  ; NoteOff
+    mov     r8d, ebx                   ; d1 = pitch
+    xor     r9d, r9d
+    call    EmitEvent
+    mov     dword ptr [rip + tiePend], 0
+pn_still_held:
+    jmp     pn_ret
+
+pn_tie_mismatch:
+    ; an open tie but THIS note differs: close the held note at the current curMs
+    ; (its onset was emitted earlier), clearing the tie, then fall into normal.
+    call    RoundCurMs
+    mov     ecx, eax
+    mov     edx, 0x80                  ; NoteOff for the previously-held pitch
+    mov     r8d, [rip + tiePitch]
+    xor     r9d, r9d
+    call    EmitEvent
+    mov     dword ptr [rip + tiePend], 0
+    ; fall through to normal emission for THIS note
+
+pn_normal:
+    ; --- NoteOn @ round(curMs) ---
+    call    RoundCurMs                ; eax = onMs
+    mov     ecx, eax                  ; timeMs
+    mov     edx, 0x90                 ; NoteOn
+    mov     r8d, ebx                  ; d1 = pitch
+    mov     r9d, 80                   ; d2 = velocity
+    call    EmitEvent
+
+    ; --- advance curMs by durWholes ---
+    movsd   xmm0, [rip + pnDur]
+    call    AdvanceCurMs
+
+    ; --- if THIS note opens a tie: SUPPRESS the NoteOff, arm tiePend ---
+    test    r12d, r12d
+    jz      pn_emit_off
+    mov     dword ptr [rip + tiePend], 1
+    mov     [rip + tiePitch], ebx
+    jmp     pn_ret
+
+pn_emit_off:
+    ; --- NoteOff @ round(curMs) ---
+    call    RoundCurMs                ; eax = offMs
+    mov     ecx, eax
+    mov     edx, 0x80                 ; NoteOff
+    mov     r8d, ebx                  ; d1 = pitch
+    xor     r9d, r9d                  ; d2 = 0
+    call    EmitEvent
+pn_ret:
+endproc
+endmodule

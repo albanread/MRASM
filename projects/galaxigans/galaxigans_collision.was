@@ -1,0 +1,159 @@
+; galaxigans_collision.was — hit tests + scoring (.CODE). v1: bullet x enemy.
+; Bomb/diver x player + explosion bursts (PtBurst) land with the dive AI.
+
+module Galaxigans
+.CODE
+
+; ---- Collide: each active bullet vs each alive enemy (AABB). On hit: kill both,
+;      +10 score. Enemy screen-x is its stored x plus the formation sway. ----
+proc Collide uses rbx rsi rdi r12 r13 frame
+    lea     rsi, [rip + bullets]
+    mov     r12d, BULLET_MAX
+col_b:
+    cmp     dword ptr [rsi + 8], 0
+    je      col_bnext
+    mov     r8d, [rsi + 0]                   ; bullet x (w=3)
+    mov     r9d, [rsi + 4]                   ; bullet y (h=8)
+    lea     rdi, [rip + enemies]
+    mov     r13d, ENEMY_MAX
+col_e:
+    cmp     dword ptr [rdi + 8], 0
+    je      col_enext
+    mov     eax, [rdi + EN_X]                ; enemy live screen x (sway/dive already folded in)
+    ; reject if no overlap on x: bx >= ex+ENEMY_W  ||  bx+2 <= ex  (bullet w=2)
+    mov     ecx, eax
+    add     ecx, ENEMY_W
+    cmp     r8d, ecx
+    jge     col_enext
+    mov     ecx, r8d
+    add     ecx, 2
+    cmp     ecx, eax
+    jle     col_enext
+    ; reject if no overlap on y: by >= ey+ENEMY_H  ||  by+6 <= ey  (bullet h=6)
+    mov     eax, [rdi + 4]                   ; enemy y
+    mov     ecx, eax
+    add     ecx, ENEMY_H
+    cmp     r9d, ecx
+    jge     col_enext
+    mov     ecx, r9d
+    add     ecx, 6
+    cmp     ecx, eax
+    jle     col_enext
+    ; hit
+    mov     ecx, [rdi + EN_X]                ; explosion at the enemy (callee-saved rsi/rdi survive)
+    mov     edx, [rdi + EN_Y]
+    call    BurstAt
+    call    PlayBoom
+    mov     dword ptr [rdi + EN_ALIVE], 0    ; enemy dead
+    mov     dword ptr [rsi + 8], 0           ; bullet spent
+    add     dword ptr [rip + score], 10
+    mov     ecx, [rdi + EN_X]                ; "+10" popup
+    mov     edx, [rdi + EN_Y]
+    lea     r8, [rip + popPlus10]
+    call    SpawnPopup
+    jmp     col_bnext                        ; one kill per bullet
+col_enext:
+    add     rdi, ENEMY_STRIDE
+    dec     r13d
+    jnz     col_e
+col_bnext:
+    add     rsi, BULLET_STRIDE
+    dec     r12d
+    jnz     col_b
+endproc
+
+; ---- CheckPlayerHit: any DIVING enemy overlapping the ship kills the player (and the
+;      diver). Player AABB is [playerX..+8] x [PLAYER_Y..+8]. No-op while already dead. ----
+proc CheckPlayerHit uses rbx rdi frame
+    cmp     dword ptr [rip + pAlive], 0
+    je      cph_done
+    mov     r8d, [rip + playerX]
+    add     r8d, 8                            ; centre the 8px hitbox on the 24-wide ship             ; player x (kept across the loop; BurstAt exits after a hit)
+    lea     rdi, [rip + enemies]
+    mov     ebx, ENEMY_MAX
+cph_e:
+    cmp     dword ptr [rdi + EN_ALIVE], 0
+    je      cph_next
+    cmp     dword ptr [rdi + EN_STATE], ST_DIVE
+    jne     cph_next
+    mov     eax, [rdi + EN_X]                ; x overlap: ex < px+8 && ex+8 > px
+    mov     ecx, r8d
+    add     ecx, 8
+    cmp     eax, ecx
+    jge     cph_next
+    mov     ecx, eax
+    add     ecx, ENEMY_W
+    cmp     ecx, r8d
+    jle     cph_next
+    mov     eax, [rdi + EN_Y]                ; y overlap: ey < PLAYER_Y+8 && ey+8 > PLAYER_Y
+    cmp     eax, PLAYER_Y + 8
+    jge     cph_next
+    mov     ecx, eax
+    add     ecx, ENEMY_H
+    cmp     ecx, PLAYER_Y
+    jle     cph_next
+    ; collision — both explode
+    mov     ecx, [rdi + EN_X]
+    mov     edx, [rdi + EN_Y]
+    call    BurstAt
+    mov     dword ptr [rdi + EN_ALIVE], 0
+    mov     ecx, [rip + playerX]
+    mov     edx, PLAYER_Y
+    call    BurstAt
+    call    PlayDeath
+    mov     dword ptr [rip + pAlive], 0
+    mov     dword ptr [rip + pDeathT], RESPAWN_FRAMES
+    dec     dword ptr [rip + lives]
+    jmp     cph_done                         ; one death per frame
+cph_next:
+    add     rdi, ENEMY_STRIDE
+    dec     ebx
+    jnz     cph_e
+cph_done:
+endproc
+
+; ---- CheckBombHit: a falling bomb (3x5) overlapping the ship (8x8) kills the player ----
+proc CheckBombHit uses rbx rdi frame
+    cmp     dword ptr [rip + pAlive], 0
+    je      cbh_done
+    mov     r8d, [rip + playerX]
+    add     r8d, 8                            ; centre the 8px hitbox on the 24-wide ship
+    lea     rdi, [rip + bombs]
+    mov     ebx, BOMB_MAX
+cbh_b:
+    cmp     dword ptr [rdi + 8], 0
+    je      cbh_next
+    mov     eax, [rdi + 0]                   ; bomb x (w=3): bx < px+8 && bx+3 > px
+    mov     ecx, r8d
+    add     ecx, 8
+    cmp     eax, ecx
+    jge     cbh_next
+    mov     ecx, eax
+    add     ecx, 3
+    cmp     ecx, r8d
+    jle     cbh_next
+    mov     eax, [rdi + 4]                   ; bomb y (h=5): by < PLAYER_Y+8 && by+5 > PLAYER_Y
+    cmp     eax, PLAYER_Y + 8
+    jge     cbh_next
+    mov     ecx, eax
+    add     ecx, 5
+    cmp     ecx, PLAYER_Y
+    jle     cbh_next
+    ; hit — bomb gone, player dies
+    mov     dword ptr [rdi + 8], 0
+    mov     ecx, [rip + playerX]
+    mov     edx, PLAYER_Y
+    call    BurstAt
+    call    PlayDeath
+    mov     dword ptr [rip + pAlive], 0
+    mov     dword ptr [rip + pDeathT], RESPAWN_FRAMES
+    dec     dword ptr [rip + lives]
+    jmp     cbh_done                         ; one death per frame
+cbh_next:
+    add     rdi, BOMB_STRIDE
+    dec     ebx
+    jnz     cbh_b
+cbh_done:
+endproc
+
+endmodule

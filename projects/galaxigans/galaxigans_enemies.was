@@ -1,0 +1,493 @@
+; galaxigans_enemies.was — the formation + the dive/return AI (.CODE). The heart of
+; Galaga: enemies sit in a swaying grid, then peel off one at a time, swoop down homing
+; on the player, and rejoin their slot when they exit the bottom.
+;
+; Each enemy's EN_X/EN_Y is its LIVE SCREEN position — for a formation enemy we fold the
+; sway into it every frame, for a diver the dive updates it. So collision + draw just read
+; EN_X/EN_Y; nobody else needs to know about formX or dive state.
+
+module Galaxigans
+.CODE
+
+; ---- ResetGame: reset player/score + lay out the 8x4 formation (home + live), all alive ----
+proc ResetGame uses rbx rsi rdi frame
+    mov     dword ptr [rip + playerX], 312
+    mov     dword ptr [rip + fireCool], 0
+    mov     dword ptr [rip + pAlive], 1
+    mov     dword ptr [rip + pDeathT], 0
+    mov     dword ptr [rip + formX], 0
+    mov     dword ptr [rip + formDir], 1
+    mov     dword ptr [rip + diveScan], 0
+    ; --- per-stage difficulty ramp (clamped); score/lives carry across stages ---
+    mov     eax, [rip + stage]
+    dec     eax                              ; s = stage-1
+    mov     ecx, eax                         ; gDivePeriod = max(18, 60 - s*8) — steeper
+    imul    ecx, ecx, 8
+    mov     edx, DIVE_PERIOD
+    sub     edx, ecx
+    cmp     edx, 18
+    jge     rg_dp
+    mov     edx, 18
+rg_dp:
+    mov     [rip + gDivePeriod], edx
+    mov     [rip + diveTimer], edx
+    imul    ecx, eax, 3                       ; gBombPeriod = max(7, 22 - s*3) — more bombs
+    mov     edx, BOMB_PERIOD
+    sub     edx, ecx
+    cmp     edx, 7
+    jge     rg_bp
+    mov     edx, 7
+rg_bp:
+    mov     [rip + gBombPeriod], edx
+    mov     [rip + bombTimer], edx
+    mov     edx, DIVE_VX                     ; gDiveVX = min(6, 3 + s)
+    add     edx, eax
+    cmp     edx, 6
+    jle     rg_vx
+    mov     edx, 6
+rg_vx:
+    mov     [rip + gDiveVX], edx
+    mov     ecx, eax                         ; gSaucerGap = max(14, 28 - s*2)
+    add     ecx, ecx
+    mov     edx, SAUCER_BOMB_GAP
+    sub     edx, ecx
+    cmp     edx, 12
+    jge     rg_sg
+    mov     edx, 12
+rg_sg:
+    mov     [rip + gSaucerGap], edx
+    xor     edx, edx                         ; gStageOff = (stage-1) mod 5 (saucer dome tint)
+    mov     ecx, 5
+    div     ecx
+    mov     [rip + gStageOff], edx
+    ; --- recolour the saucer dome for this stage ("different saucers") ---
+    imul    eax, edx, 12                      ; 3 dwords/stage; rsi -> this stage's dome
+    lea     rsi, [rip + saucerDome]
+    add     rsi, rax
+    mov     ecx, SAUCER_SLOT
+    mov     edx, 7
+    mov     r8d, [rsi]
+    call    SprSetPalette
+    mov     ecx, SAUCER_SLOT
+    mov     edx, 8
+    mov     r8d, [rsi + 4]
+    call    SprSetPalette
+    mov     ecx, SAUCER_SLOT
+    mov     edx, 9
+    mov     r8d, [rsi + 8]
+    call    SprSetPalette
+    call    SprUploadPalette
+    ; --- level look-up: {cosmos scene, formation theme} = levelTable[(stage-1) mod NUM_LEVELS] ---
+    mov     eax, [rip + stage]
+    dec     eax
+    xor     edx, edx
+    mov     ecx, NUM_LEVELS
+    div     ecx                              ; edx = level index
+    imul    edx, edx, 12                      ; 3 dwords per level row
+    lea     rcx, [rip + levelTable]
+    add     rcx, rdx
+    mov     r8d, [rcx]                        ; cosmos scene
+    mov     r9d, [rcx + 4]                    ; formation theme
+    mov     eax, [rcx + 8]                    ; capture-boss this level?
+    mov     [rip + bossEnabled], eax
+    imul    r9d, r9d, 20                      ; -> rowTypes offset (5 species * 4 bytes)
+    lea     rax, [rip + rowTypes]
+    add     rax, r9
+    mov     [rip + rowTypePtr], rax
+    mov     ecx, r8d
+    call    StarSetScene
+
+    lea     rdi, [rip + bullets]             ; all bullets inactive
+    mov     ecx, BULLET_MAX
+rg_bz:
+    mov     dword ptr [rdi + 8], 0
+    add     rdi, BULLET_STRIDE
+    dec     ecx
+    jnz     rg_bz
+
+    lea     rdi, [rip + bombs]               ; all bombs inactive
+    mov     ecx, BOMB_MAX
+rg_bombz:
+    mov     dword ptr [rdi + 8], 0
+    add     rdi, BOMB_STRIDE
+    dec     ecx
+    jnz     rg_bombz
+
+    lea     rdi, [rip + mines]               ; all mines inactive
+    mov     ecx, MINE_MAX
+rg_minez:
+    mov     dword ptr [rdi + MIN_ACTIVE], 0
+    add     rdi, MINE_STRIDE
+    dec     ecx
+    jnz     rg_minez
+
+    mov     dword ptr [rip + bossState], BS_IDLE   ; capture boss: idle, beam off, no prisoner
+    mov     dword ptr [rip + bossTimer], BOSS_FIRST
+    mov     dword ptr [rip + bossX], 304
+    mov     dword ptr [rip + bossY], -36
+    mov     dword ptr [rip + abducting], 0
+    call    BeamOff
+
+    lea     rdi, [rip + enemies]
+    xor     esi, esi                         ; row
+rg_row:
+    xor     ebx, ebx                         ; col
+rg_col:
+    mov     eax, ebx                         ; homeX = GRID_X0 + col*COL_GAP
+    imul    eax, eax, COL_GAP
+    add     eax, GRID_X0
+    mov     [rdi + EN_HX], eax
+    mov     [rdi + EN_X], eax                ; live x = home (formX is 0 at reset)
+    mov     eax, esi                         ; homeY = GRID_Y0 + row*ROW_GAP
+    imul    eax, eax, ROW_GAP
+    add     eax, GRID_Y0
+    mov     [rdi + EN_HY], eax
+    mov     [rdi + EN_Y], eax
+    mov     dword ptr [rdi + EN_ALIVE], 1
+    mov     dword ptr [rdi + EN_STATE], ST_FORM
+    mov     dword ptr [rdi + EN_VX], 0
+    mov     dword ptr [rdi + EN_DT], 0
+    mov     eax, ebx                          ; stagger the flap phase by col*7 + row*5
+    imul    eax, eax, 7
+    mov     ecx, esi
+    imul    ecx, ecx, 5
+    add     eax, ecx
+    mov     [rdi + EN_ANIM], eax
+    mov     rdx, [rip + rowTypePtr]           ; this stage's theme: species for grid row `rsi`
+    mov     eax, [rdx + rsi*4]
+    mov     [rdi + EN_TYPE], eax
+    add     rdi, ENEMY_STRIDE
+    inc     ebx
+    cmp     ebx, ENEMY_COLS
+    jl      rg_col
+    inc     esi
+    cmp     esi, ENEMY_ROWS
+    jl      rg_row
+endproc
+
+; ---- NewGame: a brand-new game — stage 1, score 0, 3 lives — then build the formation.
+;      (Clearing a stage bumps `stage` and calls ResetGame directly, keeping score/lives.) ----
+proc NewGame frame
+    mov     dword ptr [rip + stage], 1
+    mov     dword ptr [rip + score], 0
+    mov     dword ptr [rip + lives], 3
+    call    ResetGame
+endproc
+
+; ---- AttractReset: set up a RANDOM level for the attract demo (fresh formation + cosmos) ----
+proc AttractReset frame
+    call    Rng
+    xor     edx, edx
+    mov     ecx, NUM_LEVELS
+    div     ecx                              ; edx = Rng mod NUM_LEVELS
+    inc     edx                              ; stage 1..NUM_LEVELS
+    mov     [rip + stage], edx
+    mov     dword ptr [rip + lives], 3        ; full pilots for the demo
+    call    ResetGame
+    mov     dword ptr [rip + attractTick], 0
+endproc
+
+; ---- ClearField: empty the playfield (no fleet/shots/saucer/boss) — a clean backdrop ----
+proc ClearField uses rbx rdi frame
+    lea     rdi, [rip + enemies]
+    mov     ebx, ENEMY_MAX
+cf_e:
+    mov     dword ptr [rdi + EN_ALIVE], 0
+    add     rdi, ENEMY_STRIDE
+    dec     ebx
+    jnz     cf_e
+    lea     rdi, [rip + bullets]
+    mov     ebx, BULLET_MAX
+cf_b:
+    mov     dword ptr [rdi + 8], 0
+    add     rdi, BULLET_STRIDE
+    dec     ebx
+    jnz     cf_b
+    lea     rdi, [rip + bombs]
+    mov     ebx, BOMB_MAX
+cf_bo:
+    mov     dword ptr [rdi + 8], 0
+    add     rdi, BOMB_STRIDE
+    dec     ebx
+    jnz     cf_bo
+    lea     rdi, [rip + mines]
+    mov     ebx, MINE_MAX
+cf_m:
+    mov     dword ptr [rdi + MIN_ACTIVE], 0
+    add     rdi, MINE_STRIDE
+    dec     ebx
+    jnz     cf_m
+    mov     dword ptr [rip + saucerActive], 0
+    mov     dword ptr [rip + bossState], BS_IDLE
+    mov     dword ptr [rip + abducting], 0
+    call    BeamOff
+endproc
+
+; ---- FormationStep: sway the grid, maybe launch a diver, then advance every enemy:
+;      formation enemies track home+sway, divers run the swoop inline. ----
+proc FormationStep uses rbx rdi frame
+    mov     eax, [rip + formX]               ; sway formX in [-16,+16]
+    add     eax, [rip + formDir]
+    mov     [rip + formX], eax
+    cmp     eax, 16
+    jl      fs_lo
+    mov     dword ptr [rip + formDir], -1
+    jmp     fs_sway
+fs_lo:
+    cmp     eax, -16
+    jg      fs_sway
+    mov     dword ptr [rip + formDir], 1
+fs_sway:
+    dec     dword ptr [rip + diveTimer]      ; time to launch a dive?
+    jg      fs_bombchk
+    mov     eax, [rip + gDivePeriod]
+    mov     [rip + diveTimer], eax
+    call    TriggerDive
+fs_bombchk:
+    dec     dword ptr [rip + bombTimer]      ; time to drop a bomb?
+    jg      fs_walk
+    mov     eax, [rip + gBombPeriod]
+    mov     [rip + bombTimer], eax
+    call    TriggerBomb
+
+fs_walk:
+    lea     rdi, [rip + enemies]
+    mov     ebx, ENEMY_MAX
+fs_e:
+    cmp     dword ptr [rdi + EN_ALIVE], 0
+    je      fs_enext
+    inc     dword ptr [rdi + EN_ANIM]         ; advance the wing-flap
+    mov     eax, [rdi + EN_STATE]
+    cmp     eax, ST_DIVE
+    je      fs_dive
+    cmp     eax, ST_RETURN
+    je      fs_return
+    ; --- formation: live pos = home + sway ---
+    mov     eax, [rdi + EN_HX]
+    add     eax, [rip + formX]
+    mov     [rdi + EN_X], eax
+    mov     eax, [rdi + EN_HY]
+    mov     [rdi + EN_Y], eax
+    mov     dword ptr [rdi + EN_BANK], 0     ; level in formation
+    jmp     fs_enext
+fs_return:
+    ; --- glide down from the top to the OWN home slot (own row = own species) ---
+    add     dword ptr [rdi + EN_Y], RETURN_SPEED
+    mov     eax, [rdi + EN_HX]
+    add     eax, [rip + formX]               ; track the swaying column on the way in
+    mov     [rdi + EN_X], eax
+    mov     dword ptr [rdi + EN_BANK], 0     ; level on the way home
+    mov     eax, [rdi + EN_HY]
+    cmp     [rdi + EN_Y], eax
+    jl      fs_enext                          ; still descending
+    mov     [rdi + EN_Y], eax                 ; dock into the slot, ready to dive again
+    mov     dword ptr [rdi + EN_STATE], ST_FORM
+    jmp     fs_enext
+fs_dive:
+    ; --- diver: accelerating descent + a randomized WEAVE blended with gentle homing, so
+    ;     every swoop is a different snaking curve (params packed in EN_SWOOP). ---
+    inc     dword ptr [rdi + EN_DT]
+    mov     eax, [rdi + EN_SWOOP]            ; this dive's random params
+    ; vy = 2 + dt/4, cap 8 (or 10 when the 'fast' bit is set)
+    mov     ecx, [rdi + EN_DT]
+    shr     ecx, 2
+    add     ecx, 2
+    test    eax, 0x80
+    jz      fs_vcap8
+    cmp     ecx, 10
+    jle     fs_vyadd
+    mov     ecx, 10
+    jmp     fs_vyadd
+fs_vcap8:
+    cmp     ecx, 8
+    jle     fs_vyadd
+    mov     ecx, 8
+fs_vyadd:
+    add     [rdi + EN_Y], ecx                ; y += vy
+    ; weave velocity = sineLUT[(dt*wspeed + phase) & 255] * wamp >> 8
+    mov     ecx, eax                         ; wspeed = ((seed>>3)&7)+3
+    shr     ecx, 3
+    and     ecx, 7
+    add     ecx, 3
+    mov     edx, [rdi + EN_DT]
+    imul    edx, ecx
+    mov     ecx, eax                         ; + phase = (seed>>8)&255
+    shr     ecx, 8
+    and     ecx, 255
+    add     edx, ecx
+    and     edx, 255
+    lea     rcx, [rip + sineLUT]
+    movsx   ecx, word ptr [rcx + rdx*2]      ; s in [-256,256]
+    mov     edx, eax                         ; wamp = (seed&7)+2
+    and     edx, 7
+    add     edx, 2
+    imul    ecx, edx
+    sar     ecx, 8                           ; vx_weave ~ [-9,9]
+    mov     r8d, ecx                         ; net horizontal velocity (volatile; no calls below)
+    ; gentle homing once past the peel window (strength 1, or 3 if the 'hard' bit is set)
+    cmp     dword ptr [rdi + EN_DT], DIVE_PEEL
+    jl      fs_applyx
+    mov     edx, 1
+    test    eax, 0x40
+    jz      fs_homeAmt
+    mov     edx, 3
+fs_homeAmt:
+    mov     ecx, [rip + playerX]
+    cmp     [rdi + EN_X], ecx
+    jge     fs_homeNeg
+    add     r8d, edx                         ; pull toward the player (right)
+    jmp     fs_applyx
+fs_homeNeg:
+    sub     r8d, edx                         ; pull left
+fs_applyx:
+    add     [rdi + EN_X], r8d                ; integrate horizontal velocity
+    mov     dword ptr [rdi + EN_BANK], 0     ; bank into the turn (sign of net velocity)
+    test    r8d, r8d
+    jz      fs_offcheck
+    jg      fs_bankR
+    mov     dword ptr [rdi + EN_BANK], -1
+    jmp     fs_offcheck
+fs_bankR:
+    mov     dword ptr [rdi + EN_BANK], 1
+fs_offcheck:
+    cmp     dword ptr [rdi + EN_Y], FIELD_H + 8   ; exited the bottom -> re-enter from the top
+    jl      fs_enext
+    mov     dword ptr [rdi + EN_STATE], ST_RETURN
+    mov     dword ptr [rdi + EN_DT], 0
+    mov     eax, [rdi + EN_HX]
+    add     eax, [rip + formX]
+    mov     [rdi + EN_X], eax
+    mov     dword ptr [rdi + EN_Y], -20           ; appear above the screen, glide back down
+fs_enext:
+    add     rdi, ENEMY_STRIDE
+    dec     ebx
+    jnz     fs_e
+endproc
+
+; ---- Rng -> eax: xorshift32 PRNG (advances rngState). Leaf. ----
+proc Rng
+    mov     eax, [rip + rngState]
+    mov     ecx, eax
+    shl     ecx, 13
+    xor     eax, ecx
+    mov     ecx, eax
+    shr     ecx, 17
+    xor     eax, ecx
+    mov     ecx, eax
+    shl     ecx, 5
+    xor     eax, ecx
+    mov     [rip + rngState], eax
+    ret
+endproc
+
+; ---- TriggerDive: from a rotating start index, find the next alive formation enemy and
+;      launch it with a random swoop seed (the dive AI reads it for weave/home variety). ----
+proc TriggerDive uses rbx rsi rdi frame
+    mov     esi, [rip + diveScan]
+    mov     ebx, ENEMY_MAX                   ; bounded scan
+td_loop:
+    mov     eax, esi
+    xor     edx, edx
+    mov     ecx, ENEMY_MAX                   ; wrap esi -> 0..ENEMY_MAX-1 (40 isn't a power of 2)
+    div     ecx
+    imul    ecx, edx, ENEMY_STRIDE
+    lea     rdi, [rip + enemies]
+    add     rdi, rcx
+    cmp     dword ptr [rdi + EN_ALIVE], 0
+    je      td_next
+    cmp     dword ptr [rdi + EN_STATE], ST_FORM
+    jne     td_next
+    ; launch this one with a fresh random swoop seed
+    mov     dword ptr [rdi + EN_STATE], ST_DIVE
+    mov     dword ptr [rdi + EN_DT], 0
+    call    Rng
+    mov     [rdi + EN_SWOOP], eax
+    inc     esi
+    mov     [rip + diveScan], esi
+    jmp     td_done
+td_next:
+    inc     esi
+    dec     ebx
+    jnz     td_loop
+    mov     [rip + diveScan], esi
+td_done:
+endproc
+
+; ---- CountAlive -> eax = number of living enemies (0 = stage clear) ----
+proc CountAlive uses rbx rdi
+    lea     rdi, [rip + enemies]
+    mov     ebx, ENEMY_MAX
+    xor     edx, edx
+cl_loop:
+    cmp     dword ptr [rdi + EN_ALIVE], 0
+    je      cl_next
+    inc     edx
+cl_next:
+    add     rdi, ENEMY_STRIDE
+    dec     ebx
+    jnz     cl_loop
+    mov     eax, edx
+endproc
+
+; ---- TriggerBomb: the first diving enemy drops a bomb from its belly ----
+proc TriggerBomb uses rbx rdi frame
+    lea     rdi, [rip + enemies]
+    mov     ebx, ENEMY_MAX
+tb_e:
+    cmp     dword ptr [rdi + EN_ALIVE], 0
+    je      tb_next
+    cmp     dword ptr [rdi + EN_STATE], ST_DIVE
+    jne     tb_next
+    mov     ecx, [rdi + EN_X]                ; ~centre/bottom of the 8x8 diver
+    add     ecx, 3
+    mov     edx, [rdi + EN_Y]
+    add     edx, 8
+    mov     eax, [rdi + EN_TYPE]             ; this species' signature bomb
+    lea     r9, [rip + bombByType]
+    mov     r8d, [r9 + rax*4]
+    call    DropBomb
+    jmp     tb_done                          ; one drop per tick
+tb_next:
+    add     rdi, ENEMY_STRIDE
+    dec     ebx
+    jnz     tb_e
+tb_done:
+endproc
+
+; ---- DropBomb(ecx=x, edx=y, r8d=bombType): spawn a typed bomb in the first free slot ----
+proc DropBomb uses rbx rdi frame in rcx rdx r8
+    lea     rdi, [rip + bombs]
+    mov     ebx, BOMB_MAX
+db_find:
+    cmp     dword ptr [rdi + 8], 0
+    je      db_spawn
+    add     rdi, BOMB_STRIDE
+    dec     ebx
+    jnz     db_find
+    jmp     db_done                          ; pool full — skip
+db_spawn:
+    mov     [rdi + 0], ecx
+    mov     [rdi + 4], edx
+    mov     dword ptr [rdi + 8], 1
+    mov     [rdi + BOM_TYPE], r8d             ; the dropper's signature bomb sprite
+db_done:
+endproc
+
+; ---- BombsStep: fall each active bomb; despawn off the bottom ----
+proc BombsStep uses rbx rdi frame
+    lea     rdi, [rip + bombs]
+    mov     ebx, BOMB_MAX
+bm_loop:
+    cmp     dword ptr [rdi + 8], 0
+    je      bm_next
+    add     dword ptr [rdi + 4], BOMB_DY
+    cmp     dword ptr [rdi + 4], FIELD_H
+    jl      bm_next
+    mov     dword ptr [rdi + 8], 0
+bm_next:
+    add     rdi, BOMB_STRIDE
+    dec     ebx
+    jnz     bm_loop
+endproc
+
+endmodule

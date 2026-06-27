@@ -1,0 +1,152 @@
+; galaxigans_draw.was — the indexed background + the sprite-queue (.CODE).
+; DrawBackground runs in GameStep (into idxBuf); DrawScene runs in GameSprites
+; (over the resolved frame). Pure draw — no game logic.
+
+module Galaxigans
+.balign 16
+.DATA
+fOne       real4 1.0                          ; SprPush alpha
+fBurstSpd  real4 4.0                          ; explosion particle speed
+fBurstR    real4 1.0                          ; explosion colour (orange)
+fBurstG    real4 0.55
+fBurstB    real4 0.15
+.balign 16
+.CODE
+
+; ---- DrawBackground: clear the indexed canvas to black (the fleet composites over) ----
+proc DrawBackground uses rbx frame
+    xor     cl, cl                            ; index 0 -> black
+    call    Cls
+endproc
+
+; ---- DrawScene: queue the player, every alive enemy (x + sway), every live bullet.
+;      SprPush takes float screen coords in xmm1/xmm2 and alpha in xmm3. ----
+proc DrawScene uses rbx rsi frame
+    cmp     dword ptr [rip + pAlive], 0
+    je      dsc_fleet                        ; dead -> hide the ship (it's exploding)
+    mov     ecx, [rip + fPlayerC]            ; pick the bank frame from the lean
+    mov     eax, [rip + playerLean]
+    test    eax, eax
+    jz      dsc_pship
+    js      dsc_pleft
+    mov     ecx, [rip + fPlayerR]
+    jmp     dsc_pship
+dsc_pleft:
+    mov     ecx, [rip + fPlayerL]
+dsc_pship:
+    cvtsi2ss xmm1, dword ptr [rip + playerX]
+    mov     eax, PLAYER_Y
+    cvtsi2ss xmm2, eax
+    mov     r8d, SHIP_SLOT
+    movss   xmm3, [rip + fOne]
+    call    SprPush
+dsc_fleet:
+    call    DrawSaucer                       ; the bonus saucer (if active)
+    call    DrawMines                        ; the drifting spinning mines
+    call    DrawBoss                         ; the capture boss (if present)
+    call    DrawPilots                       ; the lives as a row of pilots
+    call    DrawAbductee                     ; a pilot being dragged up the beam
+    lea     rsi, [rip + enemies]
+    mov     ebx, ENEMY_MAX
+dsc_e:
+    cmp     dword ptr [rsi + EN_ALIVE], 0
+    je      dsc_enext
+    mov     eax, [rsi + EN_TYPE]             ; t (0..4); palette slot = t+1
+    lea     r8d, [rax + 1]
+    mov     ecx, [rsi + EN_BANK]             ; banking? -> rotated frame
+    test    ecx, ecx
+    jz      dsc_e_upright
+    js      dsc_e_bankL
+    lea     rdx, [rip + fBankR]
+    mov     ecx, [rdx + rax*4]
+    jmp     dsc_e_draw
+dsc_e_bankL:
+    lea     rdx, [rip + fBankL]
+    mov     ecx, [rdx + rax*4]
+    jmp     dsc_e_draw
+dsc_e_upright:
+    lea     rdx, [rip + fUp]                 ; upright frame for this type
+    mov     ecx, [rdx + rax*4]
+    lea     rdx, [rip + fUp2]                ; 2nd "flap" frame (0 if this type has none)
+    mov     edx, [rdx + rax*4]
+    test    edx, edx
+    jz      dsc_e_draw
+    mov     r9d, [rsi + EN_ANIM]             ; alternate frames every 16 ticks
+    shr     r9d, 4
+    test    r9d, 1
+    jz      dsc_e_draw
+    mov     ecx, edx                          ; show the flap frame
+dsc_e_draw:
+    cvtsi2ss xmm1, dword ptr [rsi + EN_X]    ; live screen pos (sway/dive already folded in)
+    cvtsi2ss xmm2, dword ptr [rsi + EN_Y]
+    movss   xmm3, [rip + fOne]
+    call    SprPush
+dsc_enext:
+    add     rsi, ENEMY_STRIDE
+    dec     ebx
+    jnz     dsc_e
+
+    lea     rsi, [rip + bullets]
+    mov     ebx, BULLET_MAX
+dsc_b:
+    cmp     dword ptr [rsi + 8], 0
+    je      dsc_bnext
+    mov     ecx, [rip + fBullet]
+    cvtsi2ss xmm1, dword ptr [rsi + 0]
+    cvtsi2ss xmm2, dword ptr [rsi + 4]
+    mov     r8d, PAL_SLOT
+    movss   xmm3, [rip + fOne]
+    call    SprPush
+dsc_bnext:
+    add     rsi, BULLET_STRIDE
+    dec     ebx
+    jnz     dsc_b
+
+    lea     rsi, [rip + bombs]
+    mov     ebx, BOMB_MAX
+dsc_bo:
+    cmp     dword ptr [rsi + 8], 0
+    je      dsc_bonext
+    mov     eax, [rsi + BOM_TYPE]            ; pick this bomb's sprite by type
+    lea     r9, [rip + fBombFr]
+    mov     ecx, [r9 + rax*4]
+    cvtsi2ss xmm1, dword ptr [rsi + 0]
+    cvtsi2ss xmm2, dword ptr [rsi + 4]
+    mov     r8d, BOMB_SLOT
+    movss   xmm3, [rip + fOne]
+    call    SprPush
+dsc_bonext:
+    add     rsi, BOMB_STRIDE
+    dec     ebx
+    jnz     dsc_bo
+endproc
+
+; ---- BurstAt(ecx=x, edx=y): an orange explosion at a 640x360 screen point ----
+fproc BurstAt uses rbx xmm6 frame in rcx rdx
+    cvtsi2ss xmm0, ecx
+    cvtsi2ss xmm1, edx
+    mov     ecx, 16                           ; particle count
+    movss   xmm3, [rip + fBurstSpd]
+    movss   xmm4, [rip + fBurstR]
+    movss   xmm5, [rip + fBurstG]
+    movss   xmm6, [rip + fBurstB]
+    call    PtBurst
+endproc
+
+; ---- FormatScore: render `score` as 6 zero-padded decimals into scoreStr+6 ----
+proc FormatScore uses rbx rsi frame
+    mov     eax, [rip + score]
+    lea     rsi, [rip + scoreStr + 11]        ; least-significant digit
+    mov     ebx, 6
+fmt_lp:
+    xor     edx, edx
+    mov     ecx, 10
+    div     ecx                               ; eax/=10, edx=digit
+    add     dl, '0'
+    mov     [rsi], dl
+    dec     rsi
+    dec     ebx
+    jnz     fmt_lp
+endproc
+
+endmodule

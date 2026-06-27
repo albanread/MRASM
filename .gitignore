@@ -1,0 +1,25 @@
+/target
+
+# packaged release folder (binaries + 86 MB knowledge DB + zip; output, not source)
+/release/
+
+# studio --shot / F12 offscreen review captures
+studio_shot_*.png
+# generated binaries are output, never source (studio F5, was CLI, demos)
+*.exe
+*.obj
+# demo render dumps (each demo writes a <name>.bmp of its first frame)
+*.bmp
+snap_*.png
+snap_*.bmp
+
+# GPU canvas verification scratch
+tmp_*.exe
+examples/gpu_*.bmp
+examples/gpu_*.png
+examples/snap_*.bmp
+
+# GPU verification scratch (gate PNGs + parity filmstrips + emit-asm dumps)
+_verify_out/
+examples/g6gate_*.png
+tmp_*.png

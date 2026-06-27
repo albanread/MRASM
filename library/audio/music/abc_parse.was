@@ -1,0 +1,508 @@
+module Player
+; abc_parse.was — ParseTune: the single-pass header/body char state machine.
+; Part of the abc.was shell (.CODE).
+; ----------------------------------------------------------------------------
+; ParseTune(rcx = asciiz textPtr): single-pass char-by-char state machine.
+; Calls everything -> frame.  Cursor lives in txtPtr; rsi is a local view.
+; ----------------------------------------------------------------------------
+proc ParseTune uses rsi rbx frame in rcx
+    mov     [rip + txtPtr], rcx
+
+    ; --- reset working state to defaults ---
+    movsd   xmm0, [rip + fZero]
+    movsd   [rip + curMs], xmm0
+    mov     dword ptr [rip + tuneCount], 0
+    mov     dword ptr [rip + tuneEndMs], 0
+    mov     dword ptr [rip + bpmVal], 120
+    mov     dword ptr [rip + unitN], 1
+    mov     dword ptr [rip + unitD], 8
+    mov     dword ptr [rip + tsN], 4
+    mov     dword ptr [rip + tsD], 4
+    mov     dword ptr [rip + inBody], 0
+
+    ; --- reset repeat / ending state (Sprint M-C) ---
+    mov     qword ptr [rip + repStart], 0
+    mov     dword ptr [rip + repArmed], 0
+    mov     dword ptr [rip + repPass], 1
+
+    ; --- reset ornament / rhythm state (Sprint M-E) so it is inert when absent ---
+    movsd   xmm0, [rip + fOne]
+    movsd   [rip + brokenMul], xmm0   ; pending broken multiplier = 1.0
+    movsd   [rip + tupMul], xmm0      ; tuplet ratio = 1.0
+    mov     dword ptr [rip + tupCount], 0
+    mov     dword ptr [rip + tiePend], 0
+    mov     dword ptr [rip + tiePitch], 0
+
+    ; --- reset per-voice state: active voice 0, vChan[i]=i, clocks/programs 0 ---
+    mov     dword ptr [rip + curVoice], 0
+    mov     dword ptr [rip + curChan], 0
+    lea     r8,  [rip + vChan]
+    lea     r9,  [rip + vProgram]
+    lea     r10, [rip + vCurMs]
+    movsd   xmm0, [rip + fZero]
+    xor     ecx, ecx                  ; i = 0
+pt_vinit:
+    mov     [r8 + rcx*4], ecx         ; vChan[i] = i
+    mov     dword ptr [r9 + rcx*4], 0 ; vProgram[i] = 0
+    movsd   [r10 + rcx*8], xmm0       ; vCurMs[i] = 0.0
+    inc     ecx
+    cmp     ecx, 16
+    jb      pt_vinit
+    ; (curMs already 0 above; that IS voice 0's clock)
+
+    xor     ecx, ecx
+    call    ApplyKey
+    call    ResetBar
+
+pt_loop:
+    mov     rsi, [rip + txtPtr]
+    movzx   eax, byte ptr [rsi]
+    test    al, al
+    jz      pt_end
+
+    cmp     dword ptr [rip + inBody], 0
+    jne     pt_body
+
+    ; ---------- HEADER MODE ---------- (rsi at line start)
+    ; '%' lines (comments / %%MIDI) are handled BEFORE the "X:" field test,
+    ; since they have no ':' in column 2.
+    cmp     al, '%'
+    je      pt_pct                    ; shared %/%%MIDI/comment handler
+
+    movzx   ebx, byte ptr [rsi + 1]
+    cmp     bl, ':'
+    jne     pt_h_skipline
+
+    cmp     al, 'L'
+    je      pt_h_L
+    cmp     al, 'M'
+    je      pt_h_M
+    cmp     al, 'Q'
+    je      pt_h_Q
+    cmp     al, 'K'
+    je      pt_h_K
+    cmp     al, 'V'
+    je      pt_h_V
+    jmp     pt_h_skipline
+
+pt_h_V:
+    ; header voice declaration: "V:<n> ..." — register the slot, skip the line.
+    add     rsi, 2                    ; past "V:"
+    mov     [rip + txtPtr], rsi
+    call    SkipSpaces
+    call    ParseUInt                 ; eax = 1-based voice number
+    mov     ecx, eax
+    call    SetupVoiceHeader
+    jmp     pt_h_skipline
+
+pt_h_L:
+    ; "L:<value>" — position past "L:", parse the value (ParseFieldL), skip to EOL.
+    add     rsi, 2
+    mov     [rip + txtPtr], rsi
+    call    ParseFieldL               ; sets unitN/unitD, advances txtPtr
+    jmp     pt_h_skipline
+
+pt_h_M:
+    ; "M:<value>" — position past "M:", parse the value (ParseFieldM), skip to EOL.
+    add     rsi, 2
+    mov     [rip + txtPtr], rsi
+    call    ParseFieldM               ; sets tsN/tsD, advances txtPtr
+    jmp     pt_h_skipline
+
+pt_h_Q:
+    ; "Q:<value>" — position past "Q:", parse the value (ParseFieldQ), skip to EOL.
+    add     rsi, 2
+    mov     [rip + txtPtr], rsi
+    call    ParseFieldQ               ; sets bpmVal, advances txtPtr
+    jmp     pt_h_skipline
+
+pt_h_K:
+    add     rsi, 2
+    mov     [rip + txtPtr], rsi
+    call    SkipSpaces
+    call    ParseKey                  ; sets keyAcc, advances txtPtr
+    mov     dword ptr [rip + inBody], 1
+    call    ResetBar
+    jmp     pt_h_skipline
+
+pt_h_skipline:
+    mov     rsi, [rip + txtPtr]
+pt_h_skip2:
+    movzx   eax, byte ptr [rsi]
+    test    al, al
+    jz      pt_end_sync
+    cmp     al, 10
+    je      pt_h_eol
+    inc     rsi
+    jmp     pt_h_skip2
+pt_h_eol:
+    inc     rsi
+    mov     [rip + txtPtr], rsi
+    jmp     pt_loop
+pt_end_sync:
+    mov     [rip + txtPtr], rsi
+    jmp     pt_end
+
+    ; ---------- shared '%' handler (header AND body) ----------
+    ; rsi points at the first '%'.  Cases:
+    ;   "%%MIDI " -> ParseMidiDirective   (consumes the whole line)
+    ;   "%%..."   -> stylesheet line, skip to EOL
+    ;   "%..."    -> ordinary comment, skip to EOL
+pt_pct:
+    movzx   eax, byte ptr [rsi + 1]
+    cmp     al, '%'
+    jne     pt_pct_comment            ; single '%' -> comment
+
+    ; "%%" — is it exactly "%%MIDI" followed by space/tab/EOL/NUL?
+    movzx   eax, byte ptr [rsi + 2]
+    cmp     al, 'M'
+    jne     pt_pct_comment
+    movzx   eax, byte ptr [rsi + 3]
+    cmp     al, 'I'
+    jne     pt_pct_comment
+    movzx   eax, byte ptr [rsi + 4]
+    cmp     al, 'D'
+    jne     pt_pct_comment
+    movzx   eax, byte ptr [rsi + 5]
+    cmp     al, 'I'
+    jne     pt_pct_comment
+    movzx   eax, byte ptr [rsi + 6]   ; delimiter after "%%MIDI"
+    cmp     al, ' '
+    je      pt_pct_midi
+    cmp     al, 9                      ; tab
+    je      pt_pct_midi
+    ; not the MIDI directive (e.g. "%%MIDIxxx") -> treat as a stylesheet line
+    jmp     pt_pct_comment
+
+pt_pct_midi:
+    add     rsi, 6                     ; past "%%MIDI"
+    mov     [rip + txtPtr], rsi
+    call    ParseMidiDirective         ; consumes through EOL
+    jmp     pt_loop
+
+pt_pct_comment:
+    mov     [rip + txtPtr], rsi
+    call    SkipToEol
+    jmp     pt_loop
+
+    ; ---------- BODY MODE ----------
+pt_body:
+    ; '%' lines/comments first (same handler as the header)
+    cmp     al, '%'
+    je      pt_pct
+    ; '[' opens a chord [CEG], an inline voice switch [V:n], or an inline field
+    ; [K:..]/[L:..]/etc.  Dispatch on the char after '['.
+    cmp     al, '['
+    je      pt_b_lbrack
+    ; a 'V' at line/token start followed by ':' is a voice-switch line
+    cmp     al, 'V'
+    je      pt_b_V
+    movzx   eax, byte ptr [rsi]
+    cmp     al, '|'
+    je      pt_b_bar
+    cmp     al, ':'                   ; ":|" close-repeat (a bare ':' is skipped)
+    je      pt_b_colon
+    cmp     al, '('                   ; "(<digit>" tuplet, else a slur open
+    je      pt_b_lparen
+    cmp     al, ')'                   ; slur close -> just skip
+    je      pt_b_skip
+    cmp     al, '{'                   ; grace-note group {..}
+    je      pt_b_grace
+    cmp     al, 'z'
+    je      pt_b_rest
+    cmp     al, 'Z'
+    je      pt_b_rest
+    cmp     al, '^'
+    je      pt_b_note
+    cmp     al, '_'
+    je      pt_b_note
+    cmp     al, '='
+    je      pt_b_note
+    cmp     al, 'A'
+    jb      pt_b_skip
+    cmp     al, 'G'
+    jbe     pt_b_note
+    cmp     al, 'a'
+    jb      pt_b_skip
+    cmp     al, 'g'
+    jbe     pt_b_note
+pt_b_skip:
+    inc     rsi
+    mov     [rip + txtPtr], rsi
+    jmp     pt_loop
+
+pt_b_V:
+    ; "V:<n>" voice-switch line.  If not actually followed by ':', it's not a
+    ; voice field — fall back to the generic skip (V is not a note letter).
+    movzx   eax, byte ptr [rsi + 1]
+    cmp     al, ':'
+    jne     pt_b_skip
+    add     rsi, 2                    ; past "V:"
+    mov     [rip + txtPtr], rsi
+    call    SkipSpaces
+    call    ParseUInt                 ; eax = 1-based voice number
+    mov     ecx, eax
+    call    SwitchVoice               ; save old clock, load this voice's clock
+    call    SkipToEol                 ; rest of the line (name=/clef=) ignored
+    jmp     pt_loop
+
+pt_b_lbrack:
+    ; Peek the char after '['.
+    ;   accidental (^ _ =) or a note letter (A-G / a-g)  -> chord  [CEG]
+    ;   'V' then ':'                                     -> inline voice switch
+    ;   a field letter K/Q/M/L then ':'                  -> inline field, APPLIED
+    ;     ([K:..] re-keys, [Q/M/L:..] change tempo/meter/unit) — M-D.
+    ;   any other "[X:.."                                -> skipped through ']'.
+    movzx   eax, byte ptr [rsi + 1]
+    cmp     al, '^'
+    je      pt_b_chord
+    cmp     al, '_'
+    je      pt_b_chord
+    cmp     al, '='
+    je      pt_b_chord
+    cmp     al, 'A'
+    jb      pt_b_lbrack_other
+    cmp     al, 'G'
+    jbe     pt_b_chord
+    cmp     al, 'a'
+    jb      pt_b_lbrack_other
+    cmp     al, 'g'
+    jbe     pt_b_chord
+pt_b_lbrack_other:
+    ; not a note start: voice switch [V:..], bracket ending [1/[2, an inline field
+    ; [K:..]/[Q:..]/[M:..]/[L:..] we now HANDLE (M-D), or any other [X:..] we skip.
+    cmp     al, 'V'
+    je      pt_b_inlineV
+    cmp     al, '1'                   ; "[1" first ending (bracket form of |1)
+    je      pt_b_lend1
+    cmp     al, '2'                   ; "[2" second ending (bracket form of |2)
+    je      pt_b_lend2
+    ; A handled inline field is "[<F>:" with F in {K,Q,M,L} AND the next char ':'.
+    cmp     al, 'K'
+    je      pt_b_inl_chk
+    cmp     al, 'Q'
+    je      pt_b_inl_chk
+    cmp     al, 'M'
+    je      pt_b_inl_chk
+    cmp     al, 'L'
+    je      pt_b_inl_chk
+    jmp     pt_b_inlinefield          ; any other [X:..] -> skip through ']'
+pt_b_inl_chk:
+    movzx   edx, byte ptr [rsi + 2]   ; the char after the field letter
+    cmp     dl, ':'
+    jne     pt_b_inlinefield          ; "[K..", no ':' -> not a field; skip it
+    jmp     pt_b_inlinefield_parse
+
+pt_b_lend1:
+    call    ResetBar
+    mov     rsi, [rip + txtPtr]
+    add     rsi, 2                    ; past "[1"
+    mov     [rip + txtPtr], rsi
+    call    EndingFirst               ; pass 2 -> skip forward past the next ":|"
+    jmp     pt_loop
+pt_b_lend2:
+    call    ResetBar
+    mov     rsi, [rip + txtPtr]
+    add     rsi, 2                    ; past "[2"
+    mov     [rip + txtPtr], rsi
+    jmp     pt_loop
+
+pt_b_chord:
+    add     rsi, 1                    ; past '['
+    mov     [rip + txtPtr], rsi
+    call    ParseChord                ; emits NoteOns/NoteOffs, advances txtPtr+curMs
+    jmp     pt_loop
+
+pt_b_inlinefield_parse:
+    ; A HANDLED inline field "[<F>:..]" with F in {K,Q,M,L} (M-D).  rsi is at '['.
+    ; Position past "[F:" (3 chars), call the matching value parser (ParseKey for
+    ; K; ParseFieldL/M/Q otherwise) — each applies the change to the live parse
+    ; state and advances txtPtr — then consume whatever remains through the ']'.
+    mov     rsi, [rip + txtPtr]
+    movzx   eax, byte ptr [rsi + 1]   ; the field letter F
+    add     rsi, 3                    ; past "[F:"
+    mov     [rip + txtPtr], rsi
+    cmp     al, 'K'
+    je      pt_b_inl_K
+    cmp     al, 'Q'
+    je      pt_b_inl_Q
+    cmp     al, 'M'
+    je      pt_b_inl_M
+    ; else 'L'
+    call    ParseFieldL
+    jmp     pt_b_inl_eat
+pt_b_inl_K:
+    call    SkipSpaces                ; mirror the header K: (skip leading spaces)
+    call    ParseKey                  ; re-seeds keyAcc, advances txtPtr
+    jmp     pt_b_inl_eat
+pt_b_inl_Q:
+    call    ParseFieldQ
+    jmp     pt_b_inl_eat
+pt_b_inl_M:
+    call    ParseFieldM
+pt_b_inl_eat:
+    ; consume the rest of the field through the matching ']' (or EOL/NUL).
+    mov     rsi, [rip + txtPtr]
+pt_b_inl_eat_loop:
+    movzx   eax, byte ptr [rsi]
+    test    al, al
+    jz      pt_b_inl_done             ; NUL -> stop
+    cmp     al, ']'
+    je      pt_b_inl_close
+    cmp     al, 10                    ; newline ends it too (malformed input)
+    je      pt_b_inl_done
+    inc     rsi
+    jmp     pt_b_inl_eat_loop
+pt_b_inl_close:
+    inc     rsi                       ; step past ']'
+pt_b_inl_done:
+    mov     [rip + txtPtr], rsi
+    jmp     pt_loop
+
+pt_b_inlinefield:
+    ; an UNHANDLED inline field [X:..] (X not in K/Q/M/L, or no ':') — eat from '['
+    ; through the matching ']' (or EOL/NUL) without parsing it (as before M-D).
+    mov     rsi, [rip + txtPtr]
+    inc     rsi                       ; past '['
+pt_b_inlinefield_eat:
+    movzx   eax, byte ptr [rsi]
+    test    al, al
+    jz      pt_b_inlinefield_done     ; NUL -> stop
+    cmp     al, ']'
+    je      pt_b_inlinefield_close
+    cmp     al, 10                    ; newline ends it too (malformed input)
+    je      pt_b_inlinefield_done
+    inc     rsi
+    jmp     pt_b_inlinefield_eat
+pt_b_inlinefield_close:
+    inc     rsi                       ; step past ']'
+pt_b_inlinefield_done:
+    mov     [rip + txtPtr], rsi
+    jmp     pt_loop
+
+pt_b_inlineV:
+    ; inline voice switch  [V:n]  — only if it's "[V:"; otherwise skip the '['.
+    movzx   eax, byte ptr [rsi + 1]
+    cmp     al, 'V'
+    jne     pt_b_skip
+    movzx   eax, byte ptr [rsi + 2]
+    cmp     al, ':'
+    jne     pt_b_skip
+    add     rsi, 3                    ; past "[V:"
+    mov     [rip + txtPtr], rsi
+    call    ParseUInt                 ; eax = 1-based voice number
+    mov     ecx, eax
+    call    SwitchVoice
+    ; consume through the matching ']'
+    mov     rsi, [rip + txtPtr]
+pt_b_inlineV_eat:
+    movzx   eax, byte ptr [rsi]
+    test    al, al
+    jz      pt_b_inlineV_done         ; NUL -> stop
+    cmp     al, ']'
+    je      pt_b_inlineV_close
+    cmp     al, 10                    ; newline ends it too (malformed input)
+    je      pt_b_inlineV_done
+    inc     rsi
+    jmp     pt_b_inlineV_eat
+pt_b_inlineV_close:
+    inc     rsi                       ; step past ']'
+pt_b_inlineV_done:
+    mov     [rip + txtPtr], rsi
+    jmp     pt_loop
+
+pt_b_bar:
+    ; A bar token starting with '|'.  Look at the NEXT char to classify:
+    ;   "|:"  -> open-repeat   (RepeatOpen: arm + record jump target)
+    ;   "|1"  -> first ending  (EndingMark 1: skip-the-ending on the 2nd pass)
+    ;   "|2"  -> second ending (EndingMark 2: a marker; just continue)
+    ;   "||"  -> double bar    (plain bar: ResetBar, eat both)
+    ;   "|"   -> plain bar     (ResetBar, eat one)
+    ; All cases ResetBar first (a bar boundary clears bar accidentals), then the
+    ; cursor is advanced past the consumed token by the helper / inline code.
+    call    ResetBar
+    mov     rsi, [rip + txtPtr]
+    inc     rsi                       ; past '|'
+    movzx   eax, byte ptr [rsi]
+    cmp     al, ':'                   ; "|:"  open-repeat
+    je      pt_b_open
+    cmp     al, '1'                   ; "|1"  first ending
+    je      pt_b_end1
+    cmp     al, '2'                   ; "|2"  second ending
+    je      pt_b_end2
+    cmp     al, '|'                   ; "||"  double bar
+    je      pt_b_bar_eat
+    mov     [rip + txtPtr], rsi       ; plain '|' -> just past it
+    jmp     pt_loop
+pt_b_bar_eat:
+    inc     rsi                       ; past the 2nd '|' of "||"
+    mov     [rip + txtPtr], rsi
+    jmp     pt_loop
+
+pt_b_open:
+    ; "|:"  — consume both chars, then RepeatOpen records the jump target.
+    inc     rsi                       ; past ':'
+    mov     [rip + txtPtr], rsi
+    call    RepeatOpen                ; repStart = txtPtr; repArmed = 1; repPass = 1
+    jmp     pt_loop
+
+pt_b_end1:
+    ; "|1"  — consume both chars, then EndingFirst decides (skip on pass 2).
+    inc     rsi                       ; past '1'
+    mov     [rip + txtPtr], rsi
+    call    EndingFirst               ; pass 2 -> skip forward past the next ":|"
+    jmp     pt_loop
+
+pt_b_end2:
+    ; "|2"  — consume both chars; second ending is just a marker, continue.
+    inc     rsi                       ; past '2'
+    mov     [rip + txtPtr], rsi
+    jmp     pt_loop
+
+pt_b_colon:
+    ; A token starting with ':'.  ":|" is a close-repeat; a bare ':' is skipped.
+    mov     rsi, [rip + txtPtr]
+    movzx   eax, byte ptr [rsi + 1]
+    cmp     al, '|'
+    jne     pt_b_skip                 ; bare ':' (not ":|") -> skip one char
+    ; ":|"  — ResetBar, consume both chars, then RepeatClose may jump back.
+    call    ResetBar
+    mov     rsi, [rip + txtPtr]
+    add     rsi, 2                    ; past ":|"
+    mov     [rip + txtPtr], rsi
+    call    RepeatClose               ; armed -> txtPtr = repStart, repPass = 2
+    jmp     pt_loop
+
+pt_b_rest:
+    inc     rsi
+    mov     [rip + txtPtr], rsi
+    call    ParseDuration             ; xmm0 = durWholes
+    call    ApplyRhythm               ; tuplet/pending-broken scaling (same as a note)
+    call    AdvanceCurMs              ; curMs += durWholes * msPerWhole
+    jmp     pt_loop
+
+pt_b_note:
+    call    ParseNote                 ; emits NoteOn/NoteOff, advances txtPtr+curMs
+    jmp     pt_loop
+
+pt_b_lparen:
+    ; '(' — a tuplet header IFF followed by a digit; otherwise a slur open (skip).
+    movzx   eax, byte ptr [rsi + 1]
+    cmp     al, '0'
+    jb      pt_b_skip                 ; "(" + non-digit -> slur open, just skip '('
+    cmp     al, '9'
+    ja      pt_b_skip
+    call    ParseTuplet               ; sets tupCount/tupMul, advances txtPtr
+    jmp     pt_loop
+
+pt_b_grace:
+    ; '{' — grace-note group: emit short ornament notes, then resume parsing.
+    call    ParseGraces               ; emits the grace NoteOn/NoteOffs, advances txtPtr
+    jmp     pt_loop
+
+pt_end:
+    call    FlushTie                  ; close the last active voice's open tie (if any)
+    call    FinalizeTune
+endproc
+
+endmodule

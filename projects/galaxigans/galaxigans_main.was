@@ -1,0 +1,241 @@
+; galaxigans_main.was — main + the three harness callbacks (.CODE).
+; The GPU harness (gpu/harness.was) owns the window, message pump, fixed-step timer,
+; input latch, and the default present (resolve idxBuf -> text -> sprites() -> flip).
+; A game is just main wiring the callbacks + GameInit / GameStep / GameSprites.
+
+module Galaxigans
+.CODE
+.globl main
+main:
+    sub     rsp, 40                          ; shadow space + 16-align for the calls
+    lea     rcx, [rip + titleW]
+    call    GxBoot                           ; OUR window + GpuInit/BlitInit/TxtInit + GameInit()
+IFDEF FXTEST
+    mov     ecx, ACT_FIRE                    ; a centred test shot (also starts the stage from INTRO)
+    mov     edx, 1
+    call    SimAction
+    mov     ecx, 240                         ; headless gate: film 240 frames
+    mov     edx, 20
+    call    GxSelfTest
+    call    AudioStop
+    invoke  ExitProcess, 0
+ENDIF
+    call    GxLoop                           ; interactive: fixed-step timer pump (Esc quits)
+    call    AudioStop                        ; stop the mixer + soundtrack threads
+    invoke  ExitProcess, 0
+
+; ---- GameInit: GxBoot did Gpu/Blit/Txt; bring up sprites/particles/starfield + game ----
+GameInit:
+    sub     rsp, 40
+    call    SprInit
+    call    PtInit
+    call    StarInit                         ; compile the layer-0 starfield shader
+    call    BeamInit                         ; compile the layer-1 capture-beam composite
+    call    BuildSprAssets
+    call    AudioBoot                        ; mixer + SFX bake + title music
+    call    NewGame
+    call    AttractReset                     ; open the title on a random self-playing level
+    mov     dword ptr [rip + gameState], STATE_INTRO   ; boot to the title screen
+    call    TclInit                          ; nano-TCL: executor + control verbs
+    call    TclStdVerbs                      ; documented GPU verbs (canvas/input/introspect)
+    call    RegisterTclVerbs                 ; the game's dev/test verbs
+    call    TclChannelInit                   ; \\.\pipe\nanotcl + reader thread
+    add     rsp, 40
+    ret
+
+; ---- GameStep (callback): input + logic + draw the indexed background + queue HUD text ----
+GameStep:
+    sub     rsp, 40
+    call    ExposeState                      ; publish state for the introspector ping
+    call    TclPoll                          ; drain a queued nano-TCL command / frame-sync
+    mov     eax, [rip + gameState]
+    cmp     eax, STATE_INTRO
+    je      gs_intro
+    cmp     eax, STATE_GAMEOVER
+    je      gs_dance
+    cmp     eax, STATE_HISCORE
+    je      gs_hiscore
+    cmp     eax, STATE_WIN
+    je      gs_win
+    call    PlayerStep
+    call    BulletsStep
+    call    BombsStep
+    call    FormationStep
+    call    CheckPlayerHit                   ; divers reaching the ship
+    call    CheckBombHit                     ; bombs reaching the ship
+    call    Collide
+    call    SaucerStep                       ; the bonus saucer flyby (drops bombs)
+    call    CheckSaucerHit
+    call    MineStep                         ; the saucer's rare spinning mines
+    call    CheckMineHit
+    call    CheckMineShot
+    call    BossStep                         ; the capture boss + pilot abduction
+    call    CheckBossHit                     ; shoot the boss to free an abducted pilot
+    call    PopupStep                        ; age the floating score popups
+    call    PtUpdate                         ; advance explosion debris
+    call    CountAlive                       ; stage cleared when none remain
+    test    eax, eax
+    jnz     gs_play_hud
+    mov     dword ptr [rip + gameState], STATE_WIN
+    mov     dword ptr [rip + winTimer], WIN_LEN
+    call    MusicVictory
+gs_play_hud:
+    call    FormatScore                      ; refresh the HUD digits from `score`
+    mov     ecx, 0x00FFFFFF                  ; HUD: white score, top-left — GPU text layer,
+    call    TxtSetColour                     ;   640x360 px (same space as the sprites)
+    mov     ecx, 8
+    mov     edx, 8
+    lea     r8, [rip + scoreStr]
+    call    DrawText
+    mov     eax, [rip + lives]               ; lives HUD (top-right, green)
+    add     al, '0'
+    mov     byte ptr [rip + livesStr + 6], al
+    mov     ecx, 0x0040FF40
+    call    TxtSetColour
+    mov     ecx, 560
+    mov     edx, 8
+    lea     r8, [rip + livesStr]
+    call    DrawText
+    call    DrawPopups                        ; floating "+N" score popups
+    cmp     dword ptr [rip + warnTimer], 0    ; boss arriving -> flash "WARNING"
+    jle     gs_play_end
+    dec     dword ptr [rip + warnTimer]
+    mov     eax, [rip + warnTimer]
+    and     eax, 8
+    jz      gs_play_end
+    mov     ecx, 0x00FF3030
+    call    TxtSetColour
+    mov     ecx, 250
+    mov     edx, 52
+    lea     r8, [rip + warnStr]
+    call    DrawText
+gs_play_end:
+    add     rsp, 40
+    ret
+
+; ---- GAME OVER: the aliens' triumphal spiral dance, then restart ----
+gs_dance:
+    inc     dword ptr [rip + danceFrame]
+    call    AlienDance                       ; orbit every survivor on the breathing pinwheel
+    call    PtUpdate                         ; let lingering debris fade
+    dec     dword ptr [rip + danceTimer]
+    jg      gs_dance_hud
+    call    InsertHiScore                    ; dance done -> place the score, show the table
+    call    ClearField
+    mov     dword ptr [rip + gameState], STATE_HISCORE
+    mov     dword ptr [rip + hiTimer], HISCORE_LEN
+gs_dance_hud:
+    mov     ecx, 0x00FF4040                  ; "GAME OVER" (red)
+    call    TxtSetColour
+    mov     ecx, 272
+    mov     edx, 30
+    lea     r8, [rip + gameOverStr]
+    call    DrawText
+    add     rsp, 40
+    ret
+
+; ---- HIGH SCORES: show the table for a few seconds, then back to the attract ----
+gs_hiscore:
+    dec     dword ptr [rip + hiTimer]
+    jg      gs_hiscore_draw
+    call    AttractReset
+    mov     dword ptr [rip + gameState], STATE_INTRO
+    call    MusicTitle
+gs_hiscore_draw:
+    call    DrawHiScores
+    add     rsp, 40
+    ret
+
+; ---- INTRO: title screen, waiting for fire to launch the stage ----
+; ---- INTRO = the attract demo: a random level plays itself under the title until a key ----
+gs_intro:
+    inc     dword ptr [rip + attractTick]
+    call    DemoShipStep                     ; auto-pilot (no damage applied in attract)
+    call    BulletsStep
+    call    BombsStep
+    call    FormationStep
+    call    Collide                          ; the demo's shots blow aliens up
+    call    SaucerStep
+    call    MineStep
+    call    PopupStep
+    call    PtUpdate
+    call    CountAlive                       ; cleared, or 15 s elapsed -> a new random level
+    test    eax, eax
+    jz      gs_intro_loop
+    cmp     dword ptr [rip + attractTick], 900
+    jl      gs_intro_key
+gs_intro_loop:
+    call    AttractReset
+gs_intro_key:
+    mov     ecx, ACT_FIRE                    ; "press any key" — fire / left / right
+    call    ActionHit
+    test    eax, eax
+    jnz     gs_intro_start
+    mov     ecx, ACT_LEFT
+    call    ActionHit
+    test    eax, eax
+    jnz     gs_intro_start
+    mov     ecx, ACT_RIGHT
+    call    ActionHit
+    test    eax, eax
+    jz      gs_intro_hud
+gs_intro_start:
+    call    NewGame                          ; fresh game from the title (stage 1, score 0)
+    mov     dword ptr [rip + gameState], STATE_PLAYING
+    call    MusicGameplay
+    add     rsp, 40
+    ret
+gs_intro_hud:
+    call    DrawPopups                        ; demo score popups
+    mov     ecx, 0x0050D0FF                  ; "GALAXIGANS" (cyan)
+    call    TxtSetColour
+    mov     ecx, 263
+    mov     edx, 238
+    lea     r8, [rip + titleStr]
+    call    DrawText
+    mov     eax, [rip + attractTick]          ; blink "PRESS ANY KEY TO START"
+    and     eax, 32
+    jz      gs_intro_done
+    mov     ecx, 0x00FFFFFF
+    call    TxtSetColour
+    mov     ecx, 250
+    mov     edx, 268
+    lea     r8, [rip + startStr]
+    call    DrawText
+gs_intro_done:
+    add     rsp, 40
+    ret
+
+; ---- WIN: stage clear, brief pause, then the next stage ----
+gs_win:
+    dec     dword ptr [rip + winTimer]
+    jg      gs_win_hud
+    inc     dword ptr [rip + stage]
+    call    ResetGame
+    mov     dword ptr [rip + gameState], STATE_PLAYING
+    call    MusicGameplay
+gs_win_hud:
+    mov     ecx, 0x0040FF40                  ; "STAGE CLEAR" (green)
+    call    TxtSetColour
+    mov     ecx, 288
+    mov     edx, 160
+    lea     r8, [rip + clearStr]
+    call    DrawText
+    add     rsp, 40
+    ret
+
+; ---- GameSprites (callback, r9): composite the fleet over the resolved frame ----
+GameSprites:
+    sub     rsp, 40
+    call    SprClear
+    call    DrawScene                        ; SprPush player + alive enemies + bullets
+    call    SprUpload
+    pContext.RSSetViewports(1, vp)
+    mov     rcx, [rip + pRTV]
+    call    DrawSprites                      ; one DrawInstanced over the back buffer
+    mov     rcx, [rip + pRTV]
+    call    PtDraw                           ; additive explosion debris on top
+    add     rsp, 40
+    ret
+
+endmodule

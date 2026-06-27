@@ -1,0 +1,242 @@
+; gems.was — spinning gems + an orbiting spaceship on a deep-blue sky, on the
+; GamesCanvas library, with the nano-TCL executor drawing a moon + stars (proving
+; `Verb reg=val` dispatches to the library's own global procs).
+;
+;   was tests\tcl\gems.was -o tests\tcl\gems.exe
+;
+; main + the three game procs; the library owns the window/loop/present.
+; Verifies headlessly: GameSelfTest films snap_*.bmp every few frames.
+
+; nano-TCL — dev build: NANOTCL_LIVE opens the live introspection channel (the
+; named pipe). Omit this define for a release build and the whole channel
+; compiles out (no pipe, no reader thread); the baked scripts still run.
+NANOTCL_LIVE   equ 1
+; expose the documented verbs of the modules this game links (stdverbs.was
+; IFDEF-gates each subsystem behind its NTV_ flag):
+NTV_canvas     equ 1
+NTV_blit       equ 1
+NTV_sprite     equ 1
+NTV_input      equ 1
+NTV_introspect equ 1
+
+.DATA
+titleW  WCHAR "RASM - Spinning Gems", 0
+; a gem = a diamond that "spins" by squashing horizontally over 3 frames (B = cyan 11)
+gemF0   BYTE  "..B../.BBB./BBBBB/.BBB./..B..", 0    ; face-on (fat)
+gemF1   BYTE  "..B../..B../.BBB./..B../..B..", 0    ; three-quarter
+gemF2   BYTE  "..B../..B../..B../..B../..B..", 0    ; edge-on (sliver)
+; the spaceship (F = white 15 hull, B = cyan 11 cockpit, C = red 12 engines)
+shipSprite BYTE "...F.../..FFF../.FBBBF./FFFFFFF/.C.F.C.", 0
+tick    DWORD 0
+orbitX  DWORD 14336                ; 56 << 8  (fixed-point orbit offset, starts at right)
+orbitY  DWORD 0
+gemX    DWORD 40, 110, 180, 250, 90, 220
+gemY    DWORD 60, 60, 60, 60, 130, 130
+vnStar  BYTE  "Star", 0                              ; the app's OWN verbs
+vnStep  BYTE  "step", 0
+vnPause BYTE  "pause", 0
+vnRun   BYTE  "run", 0
+running DWORD 1                                       ; 1 = auto-advance; pause/step/run toggle it
+; a baked nano-TCL script: every line dispatches to a real proc — Disc/Circle/Pset
+; from the library, and Star which THIS app registered via TclAddVerb
+nanoScript:
+    BYTE "Disc rcx=270, rdx=30, r8=12, r9=15", 10       ; a pale moon, top-right
+    BYTE "Circle rcx=270, rdx=30, r8=17, r9=11", 10     ; cyan halo around it
+    BYTE "Pset rcx=30, rdx=18, r8=15", 10               ; a few white stars
+    BYTE "Pset rcx=64, rdx=10, r8=15", 10
+    BYTE "Pset rcx=300, rdx=70, r8=15", 10
+    BYTE "Pset rcx=12, rdx=52, r8=15", 10
+    BYTE "Star rcx=205, rdx=22, r8=14", 10           ; <- an APP-defined verb, via TCL
+    BYTE "Star rcx=120, rdx=44, r8=14", 10
+    BYTE "Rect rcx=116, rdx=170, r8=88, r9=22, r10=14", 10, 0   ; Rect: a NEW std verb
+.balign 16
+
+.CODE
+.globl main
+main:
+    lea     rcx, [rip + titleW]
+    lea     rdx, [rip + GameInit]
+    lea     r8,  [rip + GameStep]
+    lea     r9,  [rip + GameSprites]
+    call    GameStart                  ; window + init (the library owns the rest)
+    call    GameLoop                   ; run live — the nano-TCL channel drives it
+    invoke  ExitProcess, 0
+
+; ---- init: gem sprite (3 spin frames) + ship sprite, the sky, the nano-TCL scene ----
+GameInit:
+    xor     ecx, ecx                   ; sprite id 0, gem frame 0
+    lea     rdx, [rip + gemF0]
+    call    DefineSprite
+    xor     ecx, ecx                   ; gem frame 1
+    lea     rdx, [rip + gemF1]
+    call    AddFrame
+    xor     ecx, ecx                   ; gem frame 2
+    lea     rdx, [rip + gemF2]
+    call    AddFrame
+    mov     ecx, 1                     ; sprite id 1: the spaceship
+    lea     rdx, [rip + shipSprite]
+    call    DefineSprite
+    call    SeedLinePalette            ; per-line palette defaults to the global palette
+    xor     ecx, ecx
+    call    set_sky                    ; deep-blue gradient sky into the per-line palette
+    mov     cl, 1                      ; fill fb with the sky field (index 1, resolved per line)
+    call    Cls
+    call    TclInit                    ; the always-present control verbs (intro/free/cont)
+    call    TclStdVerbs                ; the documented verbs of the enabled subsystems
+    lea     rcx, [rip + vnStar]        ; the app hooks in its OWN verbs
+    lea     rdx, [rip + Star]
+    call    TclAddVerb
+    lea     rcx, [rip + vnStep]
+    lea     rdx, [rip + StepVerb]
+    call    TclAddVerb
+    lea     rcx, [rip + vnPause]
+    lea     rdx, [rip + PauseVerb]
+    call    TclAddVerb
+    lea     rcx, [rip + vnRun]
+    lea     rdx, [rip + RunVerb]
+    call    TclAddVerb
+    call    TclChannelInit             ; open \\.\pipe\nanotcl + the reader thread
+    lea     rcx, [rip + nanoScript]    ; …then let TCL draw the initial scene
+    call    RunTcl
+    ret
+
+; ---- step: advance the spin clock; orbit the ship (Minsky circle, 2 shifts) ----
+GameStep:
+    call    TclPoll                    ; drain a live command (may pause/step/run/draw)
+    cmp     dword ptr [rip + running], 0
+    je      gs_step_done               ; paused -> hold this frame's logic
+    call    advance_one
+gs_step_done:
+    ret
+
+; ---- one frame of game logic: spin clock + Minsky-circle ship orbit ----
+proc advance_one frame
+    inc     dword ptr [rip + tick]
+    mov     eax, [rip + orbitY]
+    sar     eax, 5
+    sub     [rip + orbitX], eax        ; orbitX -= orbitY >> 5
+    mov     eax, [rip + orbitX]
+    sar     eax, 5
+    add     [rip + orbitY], eax        ; orbitY += orbitX >> 5
+    ; expose state for the introspector's per-frame ping (rax=tick, rcx=orbitX, rdx=orbitY)
+    xor     ecx, ecx
+    mov     edx, [rip + tick]
+    call    TclReg
+    mov     ecx, 1
+    mov     edx, [rip + orbitX]
+    call    TclReg
+    mov     ecx, 2
+    mov     edx, [rip + orbitY]
+    call    TclReg
+endproc
+
+; ---- app control verbs (registered via TclAddVerb): pause / run / step ----
+proc PauseVerb
+    mov     dword ptr [rip + running], 0
+endproc
+proc RunVerb
+    mov     dword ptr [rip + running], 1
+endproc
+proc StepVerb frame
+    call    advance_one                ; advance exactly one frame of logic, even when paused
+endproc
+
+; ---- sprites: the 6 spinning gems, then the orbiting ship ----
+GameSprites:
+    xor     ebx, ebx                   ; gem index (rbx survives SetFrame/DrawSprite)
+gs_loop:
+    cmp     ebx, 6
+    jge     gs_ship
+    mov     eax, [rip + tick]          ; frame = pingpong((tick>>2)+i) over 0,1,2,1
+    shr     eax, 2
+    add     eax, ebx
+    and     eax, 3
+    cmp     eax, 3
+    jne     gs_setf
+    mov     eax, 1
+gs_setf:
+    xor     ecx, ecx                   ; sprite id 0
+    mov     edx, eax
+    call    SetFrame
+    xor     ecx, ecx
+    lea     r10, [rip + gemX]
+    mov     edx, [r10 + rbx*4]
+    lea     r10, [rip + gemY]
+    mov     r8d, [r10 + rbx*4]
+    call    DrawSprite
+    inc     ebx
+    jmp     gs_loop
+gs_ship:
+    mov     ecx, 1                     ; sprite id 1: the ship at the orbit point
+    mov     eax, [rip + orbitX]
+    sar     eax, 8
+    add     eax, 157                   ; 160 - 3 (centre the 7-wide ship)
+    mov     edx, eax
+    mov     eax, [rip + orbitY]
+    sar     eax, 8
+    add     eax, 98                    ; 100 - 2 (centre the 5-tall ship)
+    mov     r8d, eax
+    call    DrawSprite
+    ret
+
+; ---- set_sky: a deep-blue vertical gradient straight into the per-line palette ----
+; one index (1), 200 different blues — darker at the top, lighter (faint teal) low down.
+proc set_sky uses rbx
+    lea     r8, [rip + linePal]
+    xor     edx, edx                   ; y = 0
+sky_row:
+    mov     eax, edx
+    imul    eax, eax, 3
+    shr     eax, 2                     ; B = y * 3/4 …
+    add     eax, 0x30                  ; … 0x30 .. ~0xBD (blue ramp)
+    mov     r9d, edx
+    shr     r9d, 3
+    shl     r9d, 8                     ; G = (y/8) << 8 — a faint horizon tint
+    or      eax, r9d                   ; linePal value 0x0000_GGBB
+    mov     ebx, edx
+    shl     ebx, 4                     ; y*16
+    inc     ebx                        ; + index 1
+    mov     [r8 + rbx*4], eax          ; linePal[y][1]
+    inc     edx
+    cmp     edx, 200
+    jl      sky_row
+endproc
+
+; ---- Star(rcx=x, rdx=y, r8b=colour): a 4-arm sparkle — an APP-DEFINED verb ----
+; Demonstrates the TclAddVerb hook: the app registers Star, then a baked nano-TCL
+; line `Star rcx=… ` dispatches here. It's composed of library Pset calls.
+proc Star uses rbx rsi rdi frame in rcx rdx r8
+    mov     ebx, ecx                   ; x
+    mov     esi, edx                   ; y
+    movzx   edi, r8b                   ; colour
+    mov     ecx, ebx                   ; centre
+    mov     edx, esi
+    mov     r8d, edi
+    call    Pset
+    lea     ecx, [rbx + 2]             ; right arm
+    mov     edx, esi
+    mov     r8d, edi
+    call    Pset
+    lea     ecx, [rbx - 2]             ; left arm
+    mov     edx, esi
+    mov     r8d, edi
+    call    Pset
+    mov     ecx, ebx                   ; up arm
+    lea     edx, [rsi - 2]
+    mov     r8d, edi
+    call    Pset
+    mov     ecx, ebx                   ; down arm
+    lea     edx, [rsi + 2]
+    mov     r8d, edi
+    call    Pset
+endproc
+
+; ---- the GamesCanvas library + the nano-TCL executor ----
+.include "../../library/canvas.was"
+.include "../../library/blit.was"
+.include "../../library/sprite.was"
+.include "../../library/input.was"
+.include "../../library/harness.was"
+.include "../../library/introspect.was"
+.include "../../library/tcl/tcl.was"
+.include "../../library/tcl/stdverbs.was"   ; generated per-subsystem table (gated by NTV_ flags above)

@@ -1,0 +1,32 @@
+module Sound
+; ============================================================================
+; sound.was — Sprint 1 of the retro-game audio synth (offline, hand-written asm)
+; ============================================================================
+; Reuse:  .include "../library/audio/sound/sound.was"   (path relative to YOUR file)
+;
+; Renders a sine `Beep` (fixed ADSR) into a float PCM work buffer, then writes
+; that buffer to a 44.1 kHz / 16-bit / stereo .wav you can hear.  No libm: the
+; sine comes from `sinetab.inc` (1024 x f64, sin(2*pi*i/1024)), indexed by phase.
+;
+;   Beep(rcx = freqHz, edx = durationMs)   render an ADSR'd sine into sndBuf
+;   WriteWav(rcx = pathPtrW)               write the first sndFrames frames out
+;
+; Buffer DATA it owns (read-only to you):
+;   sndBuf    real8  interleaved stereo f64 samples in [-1, 1]
+;   sndFrames DWORD  frame count of the last render
+;
+; Format: 44100 Hz, 2 channels, 16-bit signed PCM.  ADSR (seconds): attack 0.01,
+; decay 0.05, sustain level 0.7, release 0.10.  Output scaled x0.5 for headroom.
+; ============================================================================
+
+.DATA
+.balign 16                       ; data-alignment guard: caller .DATA parity could misalign structs/buffers below (see help.md)
+.include "sound_const.inc"           ; named audio-format constants (sample rate, byte rate)
+.include "sound_data.inc"
+.CODE
+.include "sound_core.was"
+.include "sound_osc.was"
+.include "sound_render.was"
+.include "sound_presets.was"
+.include "sound_play.was"
+endmodule

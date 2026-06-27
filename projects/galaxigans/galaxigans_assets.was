@@ -1,0 +1,717 @@
+; galaxigans_assets.was — decode the sprite-art bitmaps into the atlas + palette.
+; The harness already ran SprInit before GameInit.
+
+module Galaxigans
+.CODE
+
+; ---- BuildSprAssets: decode the 3 art bitmaps into atlas frames + the palette ----
+proc BuildSprAssets uses rbx frame
+    lea     rcx, [rip + shipArtC]            ; hero ship: level (24x24)
+    mov     edx, 24
+    mov     r8d, 24
+    call    DecodeSprite
+    lea     rcx, [rip + sprScratch]
+    mov     edx, 24
+    mov     r8d, 24
+    call    SprAddFrame
+    mov     [rip + fPlayerC], eax
+
+    lea     rcx, [rip + shipArtL]            ; hero ship: left-bank
+    mov     edx, 24
+    mov     r8d, 24
+    call    DecodeSprite
+    lea     rcx, [rip + sprScratch]
+    mov     edx, 24
+    mov     r8d, 24
+    call    SprAddFrame
+    mov     [rip + fPlayerL], eax
+
+    lea     rcx, [rip + shipArtR]            ; hero ship: right-bank
+    mov     edx, 24
+    mov     r8d, 24
+    call    DecodeSprite
+    lea     rcx, [rip + sprScratch]
+    mov     edx, 24
+    mov     r8d, 24
+    call    SprAddFrame
+    mov     [rip + fPlayerR], eax
+
+    lea     rcx, [rip + beeArt]              ; Bee 16x16 (shaded, palette slot 1)
+    mov     edx, 16
+    mov     r8d, 16
+    call    DecodeSprite
+    lea     rcx, [rip + sprScratch]
+    mov     edx, 16
+    mov     r8d, 16
+    call    SprAddFrame
+    mov     [rip + fEnemy], eax
+
+    lea     rcx, [rip + beeArt2]             ; Bee wings-down (flap frame 1)
+    mov     edx, 16
+    mov     r8d, 16
+    call    DecodeSprite
+    lea     rcx, [rip + sprScratch]
+    mov     edx, 16
+    mov     r8d, 16
+    call    SprAddFrame
+    mov     [rip + fEnemyFlap], eax
+
+    lea     rcx, [rip + butterflyArt]        ; Butterfly 16x16 (slot 2)
+    mov     edx, 16
+    mov     r8d, 16
+    call    DecodeSprite
+    lea     rcx, [rip + sprScratch]
+    mov     edx, 16
+    mov     r8d, 16
+    call    SprAddFrame
+    mov     [rip + fButterfly], eax
+
+    lea     rcx, [rip + bossArt]             ; Boss 16x16 (slot 3)
+    mov     edx, 16
+    mov     r8d, 16
+    call    DecodeSprite
+    lea     rcx, [rip + sprScratch]
+    mov     edx, 16
+    mov     r8d, 16
+    call    SprAddFrame
+    mov     [rip + fBoss], eax
+
+    lea     rcx, [rip + waspArt]             ; Wasp 16x16 (slot 4)
+    mov     edx, 16
+    mov     r8d, 16
+    call    DecodeSprite
+    lea     rcx, [rip + sprScratch]
+    mov     edx, 16
+    mov     r8d, 16
+    call    SprAddFrame
+    mov     [rip + fWasp], eax
+
+    lea     rcx, [rip + gruntArt]            ; Galaxian Grunt 16x16 (slot 5) — replaces the diamond
+    mov     edx, 16
+    mov     r8d, 16
+    call    DecodeSprite
+    lea     rcx, [rip + sprScratch]
+    mov     edx, 16
+    mov     r8d, 16
+    call    SprAddFrame
+    mov     [rip + fDrone], eax
+
+    lea     rcx, [rip + bulletArt]           ; bullet 2x6
+    mov     edx, 2
+    mov     r8d, 6
+    call    DecodeSprite
+    lea     rcx, [rip + sprScratch]
+    mov     edx, 2
+    mov     r8d, 6
+    call    SprAddFrame
+    mov     [rip + fBullet], eax
+
+    lea     rcx, [rip + bombArt]             ; bomb 3x5
+    mov     edx, 3
+    mov     r8d, 5
+    call    DecodeSprite
+    lea     rcx, [rip + sprScratch]
+    mov     edx, 3
+    mov     r8d, 5
+    call    SprAddFrame
+    mov     [rip + fBomb], eax
+
+    lea     rcx, [rip + plasmaOrbArt]        ; the 8 enemy-bomb sprites (mixed 6x8 / 8x8)
+    mov     edx, 6
+    mov     r8d, 8
+    call    DecAddWH
+    mov     [rip + fBombFr + 0], eax
+    lea     rcx, [rip + fireballArt]
+    mov     edx, 8
+    mov     r8d, 8
+    call    DecAddWH
+    mov     [rip + fBombFr + 4], eax
+    lea     rcx, [rip + shurikenArt]
+    mov     edx, 8
+    mov     r8d, 8
+    call    DecAddWH
+    mov     [rip + fBombFr + 8], eax
+    lea     rcx, [rip + dartArt]
+    mov     edx, 6
+    mov     r8d, 8
+    call    DecAddWH
+    mov     [rip + fBombFr + 12], eax
+    lea     rcx, [rip + lightningArt]
+    mov     edx, 6
+    mov     r8d, 8
+    call    DecAddWH
+    mov     [rip + fBombFr + 16], eax
+    lea     rcx, [rip + spikeArt]
+    mov     edx, 8
+    mov     r8d, 8
+    call    DecAddWH
+    mov     [rip + fBombFr + 20], eax
+    lea     rcx, [rip + acidGlobArt]
+    mov     edx, 6
+    mov     r8d, 8
+    call    DecAddWH
+    mov     [rip + fBombFr + 24], eax
+    lea     rcx, [rip + crystalArt]
+    mov     edx, 6
+    mov     r8d, 8
+    call    DecAddWH
+    mov     [rip + fBombFr + 28], eax
+
+    ; --- per-type frame tables: upright (fUp) + the rotated bank frames (fBankL/R) ---
+    mov     eax, [rip + fEnemy]
+    mov     [rip + fUp + 0], eax
+    mov     eax, [rip + fEnemyFlap]          ; the Bee's flap = its 2nd frame
+    mov     [rip + fUp2 + 0], eax
+    mov     eax, [rip + fButterfly]
+    mov     [rip + fUp + 4], eax
+    mov     eax, [rip + fBoss]
+    mov     [rip + fUp + 8], eax
+    mov     eax, [rip + fWasp]
+    mov     [rip + fUp + 12], eax
+    mov     eax, [rip + fDrone]
+    mov     [rip + fUp + 16], eax
+    lea     rcx, [rip + butterflyArt2]        ; the rest of the fleet flaps too
+    call    DecAdd16
+    mov     [rip + fUp2 + 4], eax
+    lea     rcx, [rip + bossArt2]
+    call    DecAdd16
+    mov     [rip + fUp2 + 8], eax
+    lea     rcx, [rip + waspArt2]
+    call    DecAdd16
+    mov     [rip + fUp2 + 12], eax
+    lea     rcx, [rip + gruntArt2]
+    call    DecAdd16
+    mov     [rip + fUp2 + 16], eax
+    lea     rcx, [rip + fBeeBankLArt]
+    call    DecAdd16
+    mov     [rip + fBankL + 0], eax
+    lea     rcx, [rip + fBeeBankRArt]
+    call    DecAdd16
+    mov     [rip + fBankR + 0], eax
+    lea     rcx, [rip + fButBankLArt]
+    call    DecAdd16
+    mov     [rip + fBankL + 4], eax
+    lea     rcx, [rip + fButBankRArt]
+    call    DecAdd16
+    mov     [rip + fBankR + 4], eax
+    lea     rcx, [rip + fBossBankLArt]
+    call    DecAdd16
+    mov     [rip + fBankL + 8], eax
+    lea     rcx, [rip + fBossBankRArt]
+    call    DecAdd16
+    mov     [rip + fBankR + 8], eax
+    lea     rcx, [rip + fWaspBankLArt]
+    call    DecAdd16
+    mov     [rip + fBankL + 12], eax
+    lea     rcx, [rip + fWaspBankRArt]
+    call    DecAdd16
+    mov     [rip + fBankR + 12], eax
+    lea     rcx, [rip + fGruntBankLArt]
+    call    DecAdd16
+    mov     [rip + fBankL + 16], eax
+    lea     rcx, [rip + fGruntBankRArt]
+    call    DecAdd16
+    mov     [rip + fBankR + 16], eax
+    ; --- the three new later-wave species (TYPE_JELLY=5 / BEETLE=6 / STING=7) ---
+    lea     rcx, [rip + jellyfishArt]
+    call    DecAdd16
+    mov     [rip + fUp + 20], eax
+    lea     rcx, [rip + beetleArt]
+    call    DecAdd16
+    mov     [rip + fUp + 24], eax
+    lea     rcx, [rip + stingrayArt]
+    call    DecAdd16
+    mov     [rip + fUp + 28], eax
+    lea     rcx, [rip + jellyfishArt2]       ; 2nd frames -> the formation flap
+    call    DecAdd16
+    mov     [rip + fUp2 + 20], eax
+    lea     rcx, [rip + beetleArt2]
+    call    DecAdd16
+    mov     [rip + fUp2 + 24], eax
+    lea     rcx, [rip + stingrayArt2]
+    call    DecAdd16
+    mov     [rip + fUp2 + 28], eax
+    lea     rcx, [rip + fJellyBankLArt]
+    call    DecAdd16
+    mov     [rip + fBankL + 20], eax
+    lea     rcx, [rip + fJellyBankRArt]
+    call    DecAdd16
+    mov     [rip + fBankR + 20], eax
+    lea     rcx, [rip + fBeetleBankLArt]
+    call    DecAdd16
+    mov     [rip + fBankL + 24], eax
+    lea     rcx, [rip + fBeetleBankRArt]
+    call    DecAdd16
+    mov     [rip + fBankR + 24], eax
+    lea     rcx, [rip + fStingBankLArt]
+    call    DecAdd16
+    mov     [rip + fBankL + 28], eax
+    lea     rcx, [rip + fStingBankRArt]
+    call    DecAdd16
+    mov     [rip + fBankR + 28], eax
+
+    lea     rcx, [rip + saucerArt]           ; bonus saucer 32x16 (slot 7)
+    mov     edx, 32
+    mov     r8d, 16
+    call    DecodeSprite
+    lea     rcx, [rip + sprScratch]
+    mov     edx, 32
+    mov     r8d, 16
+    call    SprAddFrame
+    mov     [rip + fSaucer], eax
+    lea     rcx, [rip + saucerArt2]
+    mov     edx, 32
+    mov     r8d, 16
+    call    DecodeSprite
+    lea     rcx, [rip + sprScratch]
+    mov     edx, 32
+    mov     r8d, 16
+    call    SprAddFrame
+    mov     [rip + fSaucer2], eax
+
+    lea     rcx, [rip + mineArt0]            ; the spinning mine's 8 rotation frames
+    call    DecAdd16
+    mov     [rip + fMine + 0], eax
+    lea     rcx, [rip + mineArt1]
+    call    DecAdd16
+    mov     [rip + fMine + 4], eax
+    lea     rcx, [rip + mineArt2]
+    call    DecAdd16
+    mov     [rip + fMine + 8], eax
+    lea     rcx, [rip + mineArt3]
+    call    DecAdd16
+    mov     [rip + fMine + 12], eax
+    lea     rcx, [rip + mineArt4]
+    call    DecAdd16
+    mov     [rip + fMine + 16], eax
+    lea     rcx, [rip + mineArt5]
+    call    DecAdd16
+    mov     [rip + fMine + 20], eax
+    lea     rcx, [rip + mineArt6]
+    call    DecAdd16
+    mov     [rip + fMine + 24], eax
+    lea     rcx, [rip + mineArt7]
+    call    DecAdd16
+    mov     [rip + fMine + 28], eax
+
+    lea     rcx, [rip + bossIdle0]           ; the 32x32 capture boss, 4 frames
+    call    DecAdd32
+    mov     [rip + fCbIdle0], eax
+    lea     rcx, [rip + bossIdle1]
+    call    DecAdd32
+    mov     [rip + fCbIdle1], eax
+    lea     rcx, [rip + bossCharge]
+    call    DecAdd32
+    mov     [rip + fCbCharge], eax
+    lea     rcx, [rip + bossBeam]
+    call    DecAdd32
+    mov     [rip + fCbBeam], eax
+
+    lea     rcx, [rip + pilotArt]            ; the 12x16 pilot life token
+    mov     edx, 12
+    mov     r8d, 16
+    call    DecodeSprite
+    lea     rcx, [rip + sprScratch]
+    mov     edx, 12
+    mov     r8d, 16
+    call    SprAddFrame
+    mov     [rip + fPilot], eax
+
+    call    SprUploadAtlas
+    call    SetupSprPalettes
+    call    SprUploadPalette
+endproc
+
+; ---- DecAdd16(rcx=art) -> eax = frame id: decode a 16x16 hex sprite + add an atlas frame ----
+proc DecAdd16 frame in rcx
+    mov     edx, 16
+    mov     r8d, 16
+    call    DecodeSprite
+    lea     rcx, [rip + sprScratch]
+    mov     edx, 16
+    mov     r8d, 16
+    call    SprAddFrame
+endproc
+
+; ---- DecAddWH(rcx=art, edx=w, r8d=h) -> eax = frame id: decode a w*h hex sprite + add it ----
+proc DecAddWH uses rbx r12 frame in rcx rdx r8
+    mov     ebx, edx                         ; save w
+    mov     r12d, r8d                        ; save h
+    call    DecodeSprite                     ; rcx=art, edx=w, r8d=h  (-> sprScratch)
+    lea     rcx, [rip + sprScratch]
+    mov     edx, ebx
+    mov     r8d, r12d
+    call    SprAddFrame
+endproc
+
+; ---- DecAdd32(rcx=art) -> eax = frame id: decode a 32x32 hex sprite + add an atlas frame ----
+proc DecAdd32 frame in rcx
+    mov     edx, 32
+    mov     r8d, 32
+    call    DecodeSprite
+    lea     rcx, [rip + sprScratch]
+    mov     edx, 32
+    mov     r8d, 32
+    call    SprAddFrame
+endproc
+
+; ---- DecodeSprite(rcx=textPtr, edx=w, r8d=h): hex-digit chars -> index bytes in
+;      sprScratch. '1'..'9' -> 1..9; '.' / '0' / anything else -> 0 (transparent). ----
+proc DecodeSprite uses rbx rdi in rcx rdx r8
+    mov     ebx, edx
+    imul    ebx, r8d                          ; count = w*h
+    mov     r9, rcx                           ; src text
+    lea     rdi, [rip + sprScratch]
+dsd_loop:
+    test    ebx, ebx
+    jz      dsd_done
+    movzx   eax, byte ptr [r9]                ; the source char
+    inc     r9
+    mov     ecx, eax                          ; stash original
+    sub     al, '0'
+    cmp     al, 9                             ; '0'..'9' -> 0..9
+    jbe     dsd_store
+    mov     eax, ecx                          ; not a digit: try hex 'A'..'F'
+    sub     al, 'A'
+    cmp     al, 5
+    ja      dsd_zero                          ; '.', space, junk -> transparent
+    add     al, 10                            ; 'A'..'F' -> 10..15
+    jmp     dsd_store
+dsd_zero:
+    xor     al, al
+dsd_store:
+    mov     [rdi], al
+    inc     rdi
+    dec     ebx
+    jmp     dsd_loop
+dsd_done:
+endproc
+
+; ---- SetupSprPalettes: slot 0 — [1]=white(ship/eyes) [2]=red(enemy) [3]=yellow(bullet) ----
+proc SetupSprPalettes
+    mov     ecx, PAL_SLOT
+    mov     edx, IDX_PLAYER
+    mov     r8d, 0x00D8E8FF
+    call    SprSetPalette
+    mov     ecx, PAL_SLOT
+    mov     edx, IDX_ENEMY
+    mov     r8d, 0x00FF4848
+    call    SprSetPalette
+    mov     ecx, PAL_SLOT
+    mov     edx, IDX_BULLET
+    mov     r8d, 0x00FFF030
+    call    SprSetPalette
+    mov     ecx, PAL_SLOT
+    mov     edx, IDX_BOMB
+    mov     r8d, 0x00FF40FF
+    call    SprSetPalette
+    call    SetupBeePalette
+    call    SetupButterflyPalette
+    call    SetupBossPalette
+    call    SetupWaspPalette
+    call    SetupDronePalette
+    call    SetupShipPalette
+    call    SetupSaucerPalette
+    mov     ecx, JELLY_SLOT                   ; the three new species (10-shade hue ramps)
+    lea     rdx, [rip + jellyPal]
+    mov     r8d, 10
+    call    SetSlotPal
+    mov     ecx, BEETLE_SLOT
+    lea     rdx, [rip + beetlePal]
+    mov     r8d, 10
+    call    SetSlotPal
+    mov     ecx, STING_SLOT
+    lea     rdx, [rip + stingPal]
+    mov     r8d, 10
+    call    SetSlotPal
+    mov     ecx, MINE_SLOT
+    lea     rdx, [rip + minePal]
+    mov     r8d, 8
+    call    SetSlotPal
+    mov     ecx, BOSS_CAP_SLOT
+    lea     rdx, [rip + bossCapPal]
+    mov     r8d, 12
+    call    SetSlotPal
+    mov     ecx, PILOT_SLOT
+    lea     rdx, [rip + pilotPal]
+    mov     r8d, 7
+    call    SetSlotPal
+    mov     ecx, BOMB_SLOT                    ; the 8 bombs share one hot 1..7 ramp
+    lea     rdx, [rip + bombPal]
+    mov     r8d, 7
+    call    SetSlotPal
+endproc
+
+; ---- SetSlotPal(rcx=slot, rdx=palPtr, r8d=count): set palette indices 1..count of `slot`
+;      from palPtr[0..count-1] (each 0x00RRGGBB). ----
+proc SetSlotPal uses rbx rsi r12 r13 frame in rcx rdx r8
+    mov     r12d, ecx                         ; slot
+    mov     r13, rdx                          ; palette table
+    mov     ebx, r8d                          ; count
+    mov     esi, 1                            ; palette index 1..count
+ssl_loop:
+    mov     ecx, r12d
+    mov     edx, esi
+    mov     eax, esi
+    dec     eax
+    mov     r8d, [r13 + rax*4]                ; rgb = palPtr[index-1]
+    call    SprSetPalette
+    inc     esi
+    cmp     esi, ebx
+    jle     ssl_loop
+endproc
+
+; ---- SetupSaucerPalette: slot 7 (silver hull / cyan dome / rim lights) ----
+proc SetupSaucerPalette uses rbx rsi frame
+    lea     rsi, [rip + saucerPal]
+    mov     ebx, 1
+susp_loop:
+    mov     ecx, SAUCER_SLOT
+    mov     edx, ebx
+    mov     r8d, [rsi]
+    call    SprSetPalette
+    add     rsi, 4
+    inc     ebx
+    cmp     ebx, 16
+    jl      susp_loop
+endproc
+
+; ---- SetupShipPalette: slot 6 — steel-blue hull (2-5), white (6), cyan cockpit (7-9),
+;      engine glow orange->yellow (A-C), trim (D), intake (E), sparkle (F) ----
+proc SetupShipPalette uses rbx rsi rdi frame
+    lea     rsi, [rip + shipPal]
+    mov     ebx, 1                            ; index 1..15
+sp_loop:
+    mov     ecx, SHIP_SLOT
+    mov     edx, ebx
+    mov     r8d, [rsi]
+    call    SprSetPalette
+    add     rsi, 4
+    inc     ebx
+    cmp     ebx, 16
+    jl      sp_loop
+endproc
+
+; ---- SetupDronePalette: slot 5 — GALAXIAN GRUNT: red carapace (2-5), amber wings (6-8),
+;      cyan eye glow (9), white core/antenna (A). (Replaces the rejected diamond.) ----
+proc SetupDronePalette
+    mov     ecx, DRONE_SLOT
+    mov     edx, 1
+    mov     r8d, 0x00200810
+    call    SprSetPalette
+    mov     ecx, DRONE_SLOT
+    mov     edx, 2
+    mov     r8d, 0x00C42030
+    call    SprSetPalette
+    mov     ecx, DRONE_SLOT
+    mov     edx, 3
+    mov     r8d, 0x00E84038
+    call    SprSetPalette
+    mov     ecx, DRONE_SLOT
+    mov     edx, 4
+    mov     r8d, 0x00FF6850
+    call    SprSetPalette
+    mov     ecx, DRONE_SLOT
+    mov     edx, 5
+    mov     r8d, 0x00FFB088
+    call    SprSetPalette
+    mov     ecx, DRONE_SLOT
+    mov     edx, 6
+    mov     r8d, 0x00803010
+    call    SprSetPalette
+    mov     ecx, DRONE_SLOT
+    mov     edx, 7
+    mov     r8d, 0x00C86820
+    call    SprSetPalette
+    mov     ecx, DRONE_SLOT
+    mov     edx, 8
+    mov     r8d, 0x00F0A840
+    call    SprSetPalette
+    mov     ecx, DRONE_SLOT
+    mov     edx, 9
+    mov     r8d, 0x0030E0FF
+    call    SprSetPalette
+    mov     ecx, DRONE_SLOT
+    mov     edx, 10
+    mov     r8d, 0x00FFFFFF
+    call    SprSetPalette
+endproc
+
+; ---- SetupWaspPalette: slot 4 — teal body (2-5), lime wings (6-8), yellow sting (9), magenta eyes (A) ----
+proc SetupWaspPalette
+    mov     ecx, WASP_SLOT
+    mov     edx, 1
+    mov     r8d, 0x00081810
+    call    SprSetPalette
+    mov     ecx, WASP_SLOT
+    mov     edx, 2
+    mov     r8d, 0x00134838
+    call    SprSetPalette
+    mov     ecx, WASP_SLOT
+    mov     edx, 3
+    mov     r8d, 0x001E7A5C
+    call    SprSetPalette
+    mov     ecx, WASP_SLOT
+    mov     edx, 4
+    mov     r8d, 0x002FB484
+    call    SprSetPalette
+    mov     ecx, WASP_SLOT
+    mov     edx, 5
+    mov     r8d, 0x0058E6B0
+    call    SprSetPalette
+    mov     ecx, WASP_SLOT
+    mov     edx, 6
+    mov     r8d, 0x00567A10
+    call    SprSetPalette
+    mov     ecx, WASP_SLOT
+    mov     edx, 7
+    mov     r8d, 0x008FBE20
+    call    SprSetPalette
+    mov     ecx, WASP_SLOT
+    mov     edx, 8
+    mov     r8d, 0x00CDF050
+    call    SprSetPalette
+    mov     ecx, WASP_SLOT
+    mov     edx, 9
+    mov     r8d, 0x00FFE040
+    call    SprSetPalette
+    mov     ecx, WASP_SLOT
+    mov     edx, 10
+    mov     r8d, 0x00FF40C0
+    call    SprSetPalette
+endproc
+
+; ---- SetupButterflyPalette: slot 2 — magenta wings (2-5), white body (6-8), cyan eyes (9) ----
+proc SetupButterflyPalette
+    mov     ecx, BUT_SLOT
+    mov     edx, 1
+    mov     r8d, 0x00200818
+    call    SprSetPalette
+    mov     ecx, BUT_SLOT
+    mov     edx, 2
+    mov     r8d, 0x006A1854
+    call    SprSetPalette
+    mov     ecx, BUT_SLOT
+    mov     edx, 3
+    mov     r8d, 0x00A6308A
+    call    SprSetPalette
+    mov     ecx, BUT_SLOT
+    mov     edx, 4
+    mov     r8d, 0x00D24CC0
+    call    SprSetPalette
+    mov     ecx, BUT_SLOT
+    mov     edx, 5
+    mov     r8d, 0x00F27CE6
+    call    SprSetPalette
+    mov     ecx, BUT_SLOT
+    mov     edx, 6
+    mov     r8d, 0x00808890
+    call    SprSetPalette
+    mov     ecx, BUT_SLOT
+    mov     edx, 7
+    mov     r8d, 0x00C0C8D0
+    call    SprSetPalette
+    mov     ecx, BUT_SLOT
+    mov     edx, 8
+    mov     r8d, 0x00FFFFFF
+    call    SprSetPalette
+    mov     ecx, BUT_SLOT
+    mov     edx, 9
+    mov     r8d, 0x0020E0FF
+    call    SprSetPalette
+endproc
+
+; ---- SetupBossPalette: slot 3 — green hull (2-5), purple horns (6-8), pink core (9), eyes (A) ----
+proc SetupBossPalette
+    mov     ecx, BOSS_SLOT
+    mov     edx, 1
+    mov     r8d, 0x00041206
+    call    SprSetPalette
+    mov     ecx, BOSS_SLOT
+    mov     edx, 2
+    mov     r8d, 0x00115A18
+    call    SprSetPalette
+    mov     ecx, BOSS_SLOT
+    mov     edx, 3
+    mov     r8d, 0x001E8C28
+    call    SprSetPalette
+    mov     ecx, BOSS_SLOT
+    mov     edx, 4
+    mov     r8d, 0x0030C03C
+    call    SprSetPalette
+    mov     ecx, BOSS_SLOT
+    mov     edx, 5
+    mov     r8d, 0x0060E86C
+    call    SprSetPalette
+    mov     ecx, BOSS_SLOT
+    mov     edx, 6
+    mov     r8d, 0x00702898
+    call    SprSetPalette
+    mov     ecx, BOSS_SLOT
+    mov     edx, 7
+    mov     r8d, 0x00A048D0
+    call    SprSetPalette
+    mov     ecx, BOSS_SLOT
+    mov     edx, 8
+    mov     r8d, 0x00C880F0
+    call    SprSetPalette
+    mov     ecx, BOSS_SLOT
+    mov     edx, 9
+    mov     r8d, 0x00FF50FF
+    call    SprSetPalette
+    mov     ecx, BOSS_SLOT
+    mov     edx, 10
+    mov     r8d, 0x00FFFFFF
+    call    SprSetPalette
+endproc
+
+; ---- SetupBeePalette: slot 1 — blue body ramp (2-5), amber wing ramp (6-9), red eyes (A),
+;      white glint (B). Shades-of-a-hue so the bug reads as sculpted, not flat. ----
+proc SetupBeePalette
+    mov     ecx, BEE_SLOT
+    mov     edx, 1
+    mov     r8d, 0x00101830                  ; outline / shadow
+    call    SprSetPalette
+    mov     ecx, BEE_SLOT
+    mov     edx, 2
+    mov     r8d, 0x002A4C8C                  ; body blue, dark
+    call    SprSetPalette
+    mov     ecx, BEE_SLOT
+    mov     edx, 3
+    mov     r8d, 0x003E6CC8                  ; body blue, mid
+    call    SprSetPalette
+    mov     ecx, BEE_SLOT
+    mov     edx, 4
+    mov     r8d, 0x005A90F0                  ; body blue, light
+    call    SprSetPalette
+    mov     ecx, BEE_SLOT
+    mov     edx, 5
+    mov     r8d, 0x008FBEFF                  ; body blue, specular
+    call    SprSetPalette
+    mov     ecx, BEE_SLOT
+    mov     edx, 6
+    mov     r8d, 0x00806000                  ; wing amber, dark
+    call    SprSetPalette
+    mov     ecx, BEE_SLOT
+    mov     edx, 7
+    mov     r8d, 0x00C09010                  ; wing amber, mid
+    call    SprSetPalette
+    mov     ecx, BEE_SLOT
+    mov     edx, 8
+    mov     r8d, 0x00FFD030                  ; wing amber, bright
+    call    SprSetPalette
+    mov     ecx, BEE_SLOT
+    mov     edx, 9
+    mov     r8d, 0x00FFF6A0                  ; wing amber, hot tip
+    call    SprSetPalette
+    mov     ecx, BEE_SLOT
+    mov     edx, 10                          ; 'A' = eye red
+    mov     r8d, 0x00FF3040
+    call    SprSetPalette
+    mov     ecx, BEE_SLOT
+    mov     edx, 11                          ; 'B' = glint white
+    mov     r8d, 0x00FFFFFF
+    call    SprSetPalette
+endproc
+
+endmodule

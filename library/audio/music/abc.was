@@ -1,0 +1,88 @@
+module Player
+; ============================================================================
+; abc.was — ABC-notation music parser CORE (offline, hand-written x86-64, WRASM)
+; ============================================================================
+; Reuse:  .include "../library/audio/music/abc.was"   (path relative to YOUR file)
+;
+; Parses ABC text into a flat, time-sorted array of MIDI events (the `Tune`),
+; then dumps the events as raw 20-byte records to a binary file you verify
+; offline (the music-side `WriteWav`).  No synthesis here — just the parse +
+; the timing model + the finalization sort.  Single-pass, char-by-char.
+;
+;   ParseTune(rcx = asciiz textPtr)   parse ABC -> tuneEv / tuneCount / tuneEndMs
+;   WriteTune(rcx = pathPtrW)         dump tuneCount * 20-byte records to a file
+;
+; MidiEvent (20 bytes):  timeMs u32 | status u32 | chan u32 | d1 u32 | d2 u32
+;   offsets:             +0           +4           +8         +12      +16
+; status: NoteOn 0x90 (vel 80), NoteOff 0x80 (vel 0); chan 0.
+;
+; Timing (drift-free): curMs carried as f64; only emitted u32 stamps rounded.
+;   msPerWhole = tsDen * 60000 / bpm
+;   durWholes  = (N/M) * (unitN/unitD)
+;   NoteOn  @ round(curMs);  NoteOff @ round(curMs + durWholes*msPerWhole)
+;   curMs  += durWholes*msPerWhole          (round(x) = floor(x+0.5))
+;
+; --- CURSOR CONVENTION ---
+; The single-pass text cursor lives in the `.DATA` global `txtPtr` (a char*), NOT
+; in a register.  Cursor-advancing helpers (ParseUInt, ParseKey, ParseDuration,
+; ParseNote, SkipSpaces) read it into a local register, advance, and write it
+; back.  This keeps the WRASM contract checker happy — no callee-saved register is
+; abused as a shared mutable cursor — while the advance is plainly visible.
+;
+; --- CORE grammar handled ---
+;   Header (before K:):  M: meter, L: default note length, Q: tempo bpm
+;                        (accepts "120" or "1/4=120" -> takes the number), K: key.
+;   K: ends the header.  Keys: C G D A E B F#  and  F Bb Eb Ab Db Gb  (root letter
+;     + one optional #/b), via the circle of fifths.  Sets per-pitch-class default
+;     accidentals from the key sig.
+;   Notes: accidentals ^ ^^ _ __ = ; letters A-G (oct 4) / a-g (oct 5);
+;     octave marks ' (+12) , (-12), stackable.  MIDI octave: C4 = 60
+;     (midi = (oct+1)*12 + semitone), so an uppercase 'C' -> 60.
+;   Durations rel. to L: bare N -> xN ; / -> /2 ; /M -> /M ; N/M -> xN/M.
+;   Rests z/Z (advance curMs, emit nothing).  Bar line | resets bar accidentals.
+;   Spaces/newlines separate; unknown chars ignored gracefully.
+;
+; --- IMPLEMENTED beyond the monophonic core ---
+;   multi-voice V: (header decl + body switch + inline [V:n]) — voices play
+;     SIMULTANEOUSLY, each with its own running clock (see abc_voice.was);
+;   per-voice instruments via %%MIDI program <prog> / <chan> <prog> (emits a
+;     0xC0 ProgramChange);  % line comments and %% stylesheet lines (skipped);
+;   chords [CEG] — N notes share one onset + one duration + one offset, with the
+;     duration taken from AFTER the ']' (see abc_chord.was);
+;   repeats |: :| and first/second endings |1 |2 — replayed by JUMPING the text
+;     cursor back and re-parsing, while curMs keeps advancing so the replay lands
+;     at later timestamps (see abc_repeat.was).  ONE level only — no nesting.
+;   ties `-`, broken rhythm `> <`, tuplets `(p[:q[:r]]`, and grace notes `{..}`
+;     (Sprint M-E, see abc_ornament.was + ParseNote): a tie holds one sustained
+;     note across the next same-pitch note (one On, one Off); broken `a>b` makes a
+;     x1.5 / b x0.5 (and `a<b` the reverse); a tuplet `(3CDE` scales the next r
+;     notes by q/p; a grace group `{ab}c` emits short 60 ms ornament notes that
+;     steal a little time just before the main note.  All scale the SAME durWholes
+;     used for both the NoteOff stamp and the curMs advance, and ALL of the new
+;     state is reset (multipliers 1.0, counts 0) at the top of ParseTune so a tune
+;     without ornaments is byte-identical to before.
+;
+; --- DEFERRED (no-ops / skipped, NOT implemented) ---
+;   nested repeats, trailing duration dots (the `>`/`<` broken rhythm is handled,
+;   but a `.`-dotted duration is not), and minor/mode key qualifiers beyond the
+;   root letter + one optional #/b for the key sig (modes ARE handled in ParseKey).
+;   Slurs ( ) are accepted but inert (skipped); only the FIRST `>`/`<` after a note
+;   is honoured — any extra `>`/`<` (e.g. `>>`) is ignored, NOT double-dotted; a
+;   `(` not followed by a digit is a slur, not a tuplet.
+; ============================================================================
+
+.DATA
+.balign 16                       ; data-alignment guard: caller .DATA parity could misalign structs/buffers below (see help.md)
+.include "abc_data.inc"
+.CODE
+.include "abc_scan.was"
+.include "abc_field.was"
+.include "abc_note.was"
+.include "abc_voice.was"
+.include "abc_chord.was"
+.include "abc_repeat.was"
+.include "abc_ornament.was"
+.include "abc_parse.was"
+.include "abc_finalize.was"
+.include "abc_play.was"
+endmodule
