@@ -20,6 +20,7 @@ pub mod difftest;
 #[cfg(feature = "llvm")]
 pub mod llvm;
 pub mod macho;
+pub mod macho_exe;
 #[cfg(feature = "llvm")]
 pub mod oracle;
 pub mod pe;
@@ -29,5 +30,6 @@ pub use a64::A64Encoder;
 pub use backend::{EncodedModule, Encoder, Reloc, RelocKind};
 pub use coff::write_coff;
 pub use macho::write_macho_obj;
+pub use macho_exe::write_macho_exe;
 pub use pe::write_pe;
 pub use rasm::{assemble, assemble_listing, is_register, looks_like_number, RasmEncoder};
