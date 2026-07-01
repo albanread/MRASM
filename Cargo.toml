@@ -3,8 +3,8 @@
 # now — it path-deps WF66's `docpane` (a Direct2D/DirectWrite render core) and
 # `doccrate/rust-tcl`, both Windows-only. The Mac IDE shell will be re-added once
 # a macOS render core (the WF66->MF66 / MacNCL line) is wired up. See mrasm-port.
-members = [".", "crates/winkb", "crates/was", "crates/ide"]
-default-members = [".", "crates/winkb", "crates/was", "crates/ide"]
+members = [".", "crates/winkb", "crates/was", "crates/ide", "crates/mackb"]
+default-members = [".", "crates/winkb", "crates/was", "crates/ide", "crates/mackb"]
 resolver = "2"
 
 [package]

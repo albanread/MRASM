@@ -1,0 +1,11 @@
+[package]
+name = "mackb"
+version = "0.1.0"
+edition = "2021"
+description = "Read-only knowledge layer over cocoa.sqlite (the shared macOS Objective-C/SDK metadata mirror): Cocoa method ABI shapes, C function signatures, struct layouts."
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+# bundled = compile SQLite from source, so there is no system-SQLite dependency.
+rusqlite = { version = "0.32", features = ["bundled"] }

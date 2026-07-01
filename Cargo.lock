@@ -172,6 +172,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mackb"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rusqlite",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
