@@ -17,7 +17,11 @@ pub mod a64;
 pub mod backend;
 pub mod coff;
 pub mod difftest;
+#[cfg(feature = "llvm")]
+pub mod llvm;
 pub mod macho;
+#[cfg(feature = "llvm")]
+pub mod oracle;
 pub mod pe;
 pub mod rasm;
 

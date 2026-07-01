@@ -18,16 +18,25 @@ license = "MIT"
 name = "rasm-as"
 path = "src/bin/rasm_as.rs"
 
+[[bin]]
+name = "a64-corpus"
+path = "src/bin/a64_corpus.rs"
+required-features = ["llvm"]
+
 [features]
-# The AArch64 encoder's `oracle_diff` gate (src/a64) compares byte-for-byte
-# against an LLVM-MC oracle, exactly like the x86 corpus was built. The oracle
-# module is not yet ported into MRASM, so this feature is a declared placeholder
-# (silences the cfg warning) — enabling it will not compile until the oracle and
-# AArch64 corpus land. See mrasm-port.
-llvm = []
+# NATIVE IS THE DEFAULT — a plain build has NO LLVM-C dependency. `llvm` (opt-in)
+# links LLVM-C and compiles the LLVM-MC differential oracle (src/llvm.rs,
+# src/oracle.rs) that keeps RasmEncoder/A64Encoder byte-honest; it is a
+# build/test-time tool only (`a64::oracle_diff`, `oracle::tests`, the
+# `a64-corpus` corpus-regen bin), nothing on the shipping native path.
+llvm = ["dep:object"]
 
 [dependencies]
 anyhow = "1"
+# Parses the relocatable object LLVM-MC emits for the differential oracle
+# (`src/oracle.rs`) into an `EncodedModule`. COFF (x86) + Mach-O (AArch64).
+# Optional — pulled in only by the `llvm` feature.
+object = { version = "0.36", optional = true, default-features = false, features = ["read_core", "coff", "elf", "macho", "std"] }
 
 [dev-dependencies]
 # Decoder-only — the round-trip oracle for the encoder's unit tests

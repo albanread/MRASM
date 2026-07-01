@@ -19,6 +19,8 @@ use crate::backend::{Encoder, EncodedModule, Reloc, RelocKind};
 
 /// Per-arch templated form generators (x86-64 today). See [`IsaModel`].
 pub mod x86;
+/// AArch64 templated form generator. See [`IsaModel`].
+pub mod aarch64;
 
 /// The outcome of diffing one assembled form.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -479,6 +481,31 @@ mod tests {
             n += 1;
         }
         assert!(n > 1000, "corpus suspiciously small ({n} forms) — regenerate with `rasm-corpus`");
+    }
+
+    /// The AArch64 no-LLVM regression gate: `A64Encoder` must reproduce every
+    /// committed golden in `corpus/aarch64.tsv` byte-for-byte. Runs without the
+    /// `llvm` feature — the corpus *is* the frozen oracle. Regenerate with
+    /// `cargo run --bin a64-corpus --features llvm` after closing gaps.
+    #[test]
+    fn corpus_replay_aarch64_matches_golden() {
+        use crate::a64::A64Encoder;
+        let corpus = include_str!("../corpus/aarch64.tsv");
+        let mut n = 0usize;
+        for (i, line) in corpus.lines().enumerate() {
+            if line.is_empty() {
+                continue;
+            }
+            let (asm, golden) = parse_corpus_line(line)
+                .unwrap_or_else(|| panic!("corpus line {} malformed: {line:?}", i + 1));
+            let rm = A64Encoder
+                .encode(&asm)
+                .unwrap_or_else(|e| panic!("a64 failed on corpus form `{asm}`: {e:#}"));
+            let v = compare(&asm, &rm, &golden);
+            assert!(v.is_match(), "corpus regression on `{asm}`: {v}");
+            n += 1;
+        }
+        assert!(n > 1000, "aarch64 corpus suspiciously small ({n} forms) — regenerate with `a64-corpus`");
     }
 
     // Unit tests for the normalization logic — no oracle needed.
