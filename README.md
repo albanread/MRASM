@@ -1,117 +1,159 @@
-# WRASM
+# MRASM
 
-### Powerful assistance that conceals nothing
+### Powerful assistance that conceals nothing — now on Apple Silicon
 
-![The WRASM studio — hand-written asm with its live machine-code bytes on the left, the WNDCLASSEXW struct card (offsets, field types, ready-to-insert frame) on the right](selfie.png)
+The macOS arm64 port of **[WRASM](https://github.com/albanread/WRASM)**, a
+from-scratch, self-contained assembler whose whole premise is that macro
+assembly and the "high-level assembler" conveniences (`invoke`, typed structs,
+declared-subroutine contracts) should never hide a single instruction — and
+that an assembler should carry an intense, offline, always-available knowledge
+of the platform it targets, instead of making you go look things up.
 
-A from-scratch, self-contained **x86-64 assembler for Windows** — and the
-knowledge-driven IDE growing around it. No LLVM, no JIT, no external linker:
-source text goes in, a running `.exe` comes out.
+On Windows that knowledge is Win32 + COM. On macOS it's Cocoa, Metal, and
+POSIX — reached the same way Objective-C reaches them: `objc_msgSend` plus a
+registered selector, which turns out to be a *simpler* dispatch story than a
+COM vtable, not a harder one. MRASM's job is to bring WRASM's whole
+philosophy — visible codegen, checked contracts, a real knowledge database —
+to that world.
 
-Four things make it different:
+> **Status: early, active port.** The AArch64 encoder and a genuinely
+> self-contained, self-signed Mach-O executable writer are done and tested on
+> real hardware. The `was` front-end (`invoke`/`comcall`/`objccall`, the
+> `proc`/`frame` contract checks) is **not yet ported** — it still only
+> generates Win64/x86 text. See [Current status](#current-status) below for
+> the precise line.
 
-- **Byte-identical to LLVM-MC.** The encoder is validated against LLVM as a
-  differential oracle across integer, SSE/SSE2, AVX/AVX2 (VEX) and AVX-512
-  (EVEX). A frozen corpus of 5,109 goldens gates every build — with no LLVM
-  present at test time.
-- **It knows Windows.** A read-only knowledge layer over a ~165,000-symbol
-  database (functions + parameter types, constants, enums, struct layouts with
-  byte offsets, and COM IIDs, vtable slots, and method parameter types) means you
-  write `invoke CreateFileW, …`, `sizeof(RECT)`, `RECT.right`, and
-  `pDevice.CreateRenderTargetView(…)`, not magic numbers.
-- **Structured asm you can trust — automate the tedium, show every byte.**
-  Data-aware macros (`invoke`, `comcall`/`comobj`, `iid`, `struct` instances) and
-  a declared-subroutine convention (`proc … endproc` with `uses`/`in`/`out` and an
-  opt-in `frame`) expand to *visible* instructions — never hidden codegen. The
-  contract then *checks* what you declared: a callee-saved register clobbered
-  across a call, an `in`/`out` mismatch, a stack left off the aligned frame.
-- **Self-contained output.** It emits COFF `.obj` files *and* complete PE `.exe`
-  files with their own import directory and thunks — no `link.exe` required.
+## Why this is more tractable than it sounds
 
-> Status: the core (source → `.exe`) is complete and byte-identical to LLVM-MC.
-> The authoring layer — the COM macros, the `proc`/`frame` convention and its
-> contract/clobber checks, float→`xmm` marshaling, `.include`, `.ASCIISTRING` —
-> is in and unit-tested. A growing demo corpus exercises it end to end: GDI
-> framebuffers, a D3D11 shader Mandelbrot with rubber-band zoom, a Direct2D
-> particle fountain, and the start of a retro indexed-colour game canvas. The IDE
-> serves cards, live checks and builds from one headless language thread.
+Three things that looked like the hard parts turned out to already exist,
+reused rather than rebuilt from zero:
+
+- **The AArch64 encoder** is ported from a sibling project
+  ([JASM](https://github.com/albanread/JASM)) that already built a
+  corpus-gated, byte-identical-to-LLVM-MC native AArch64 encoder for a
+  different assembler. It covers integer/memory/control, scalar FP, and the
+  full NEON surface.
+- **`objc_msgSend` register marshaling** — the AArch64 equivalent of Win64's
+  `invoke` shadow-space arithmetic — has a hand-written reference
+  implementation in a sibling Forth project (MF67's `kernel/objc.masm`,
+  literal AArch64 asm) and a *parametric* generator for every argument-shape
+  variant (`src/objc.rs::synth_send_thunk`), both directly liftable.
+- **The Cocoa/Metal/POSIX knowledge database already exists**, shared across
+  every native-macOS project in this portfolio: `cocoa_data`, a 158MB SQLite
+  mirror of the live Objective-C runtime + BridgeSupport metadata (482,000
+  method encodings, already classified into exact AAPCS64 register shapes).
+  MRASM doesn't need to build a windows_api.db-style generator — it needs a
+  thin reader, which is done (`mackb`, below).
+
+## Current status
+
+| piece | state |
+|---|---|
+| **x86-64 encoder** (`RasmEncoder`) | Unmodified from WRASM. Still gated by the original 5,116-form corpus. Present, tested, but not the point of this fork — kept because nothing needed removing it. |
+| **AArch64 encoder** (`A64Encoder`) | **Done.** Ported from JASM; gated by its own 1,181-form frozen corpus (no LLVM needed to build); additionally verified against a live LLVM-MC oracle (26 `oracle_diff` tests, `--features llvm`). |
+| **Mach-O object writer** (`write_macho_obj`) | **Done.** Emits a relocatable `MH_OBJECT` `.o`; proven by handing it to the system `clang`/`ld64` and running the result (`tests/macho_run42.rs`). |
+| **Self-contained signed Mach-O executable** (`write_macho_exe`) | **Done, for extern-free programs.** Emits a complete, runnable `MH_EXECUTE` with a real embedded ad-hoc code signature (computed in-crate with `sha2` — no shell-out to `codesign`) and **no external linker at all**. `codesign --verify` accepts the output; the kernel executes it directly (`tests/macho_exe_run42.rs`). **Does not yet support calling out** to a dylib (`module.externs` must be empty) — that needs a dyld bind mechanism plus `__stubs`/GOT trampolines, not yet built. |
+| **`mackb`** (Cocoa/SDK knowledge reader) | **Done.** A read-only reader over the shared `cocoa_data` database: exact and by-name Objective-C method ABI shapes, ambiguity detection, plain C function signatures (framework APIs), struct layouts. Verified against the real 158MB database. Has its own CLI. |
+| **`was` front-end for AAPCS64** (`invoke`, `objccall`) | **Not started.** WRASM's `was` crate still only emits Win64/x86 assembly text — `invoke`/`comcall` generate `push rbx`/shadow-space arithmetic/`rcx,rdx,r8,r9` directly, not just reference a register-name table. An AAPCS64 equivalent is a parallel code-generation backend, planned as a separate crate reusing only `was`'s OS-neutral macro engine (`.if`/`.while`, struct instances, `.include`, equate expansion). |
+| **dyld bind / `__stubs` subsystem** | **Not started.** Prerequisite for the AAPCS64 front-end to produce anything that can actually call Cocoa, Metal, or even `printf` — right now `write_macho_exe` refuses any module with externs, on purpose, rather than emit something that looks right and crashes. |
+| **`studio`** (the GUI IDE) | **Dropped from the workspace entirely**, not ported. It path-depends on a Windows-only Direct2D render core (`WF66`'s `docpane`) and a Windows-only `doccrate/rust-tcl`. A macOS render core exists in a sibling project's line of work and can be wired in once there's a front-end worth showing. |
+| **`ide`** (knowledge → markdown cards) | Untouched from WRASM — still renders `winkb` (Win32) content. Will need a `mackb`-backed counterpart once there's something for it to describe. |
+
+In short: **the two hardest-sounding systems problems — a verified native
+AArch64 encoder, and a signed executable with no external linker — are done.**
+What's left is mostly *front-end* work: teaching `was`'s macro layer to speak
+AAPCS64 and `objc_msgSend` instead of Win64 and COM, and letting the resulting
+programs actually call out to the OS.
 
 ## Workspace
 
 | crate | what it is |
 |-------|------------|
-| **`rasm`** (root) | The x86-64 encoder (Intel-syntax text → bytes), plus the COFF `.obj` and self-contained PE `.exe` writers, the differential-test corpus, and the `rasm-as` CLI. |
-| **`winkb`** | The knowledge layer: a read-only API over `windows_api.db` (search, resolve, function + COM-method signatures, struct layouts, interfaces, snippets, did-you-mean). `winkb` CLI. |
-| **`was`** | The Windows assembler front-end: rewrites a thin, *transparent* superset of Intel asm into rasm text, then assembles. `invoke`/`comcall`/`comobj`/`iid`, `struct` instances, `Struct.field`, `sizeof(T)`, `proc`/`frame`, `.if`/`.while`, `.ASCIISTRING`, `.include` — all expanding to instructions you can see, with the contract checks on top. `was` CLI (`.obj`/`.exe`/`--check`). |
-| **`ide`** | The assistant as *content*: turns a winkb query into renderable markdown cards (functions with arg→register marshaling, structs, COM methods, registers + ABI, instruction/flags, the `proc` convention, your own local symbols), and models the interactive insert frame. GUI-free and unit-tested. `ide-card` CLI. |
-| **`studio`** | The IDE front-end: the [language thread](crates/studio/src/lang.rs) (all `!Sync` state on one worker, message-passed), the live-check/ghost-byte seam, caret cards, and autocomplete. `studio-repl` drives the whole stack from a terminal. |
-
-## The authoring layer
-
-Everything below lowers to plain, visible x86-64 — inspect it with `was … --emit-asm`.
-
-- **`invoke F, a, b, …`** — Win64-ABI marshaling from the db signature (shadow
-  space, arg→register, **float args to `xmm` automatically** from the param type).
-- **COM, the data-aware way** — `comobj p : ID3D11Device` then
-  `p.CreateRenderTargetView([rip+tex], 0, pRTV)`; vtable slot, struct offsets, and
-  `iid ID3D11Texture2D` GUIDs all come from the db.
-- **`struct LABEL TYPE … ends`** — a struct instance laid out at the db's byte
-  offsets (`BufferDesc.Width = 1280`).
-- **`proc NAME uses … in … out … [frame] … endproc`** — a declared subroutine:
-  visible prologue/epilogue, and the contract is *checked*. `frame` reserves the
-  shadow/alignment once so the calls inside go lean. The caller-side **clobber
-  check** warns when a value in a volatile register is destroyed across a call.
-- **`.ASCIISTRING … .ENDASCIISTRING`** — embed raw text (HLSL shader source, say)
-  verbatim; **`.include "file"`** — compose a program from many files.
+| **`rasm`** (root) | Both encoders (`RasmEncoder` for x86-64, `A64Encoder` for AArch64), the object/executable writers (`write_coff`/`write_pe` for Windows, `write_macho_obj`/`write_macho_exe` for macOS), the differential-test corpora for both architectures, and the `rasm-as` CLI. |
+| **`winkb`** | The Windows knowledge layer: a read-only API over `windows_api.db` (Win32 functions, COM interfaces, struct layouts). Unmodified from WRASM. |
+| **`mackb`** *(new)* | The macOS knowledge layer: a read-only API over `cocoa.sqlite` (Objective-C method ABI shapes, framework C function signatures, struct layouts). See [mackb](crates/mackb). |
+| **`was`** | The Windows assembler front-end (`invoke`/`comcall`/`comobj`/`proc`/`frame`/`.if`/`.while`/`.include`). Unmodified from WRASM — still Win64-only; the AAPCS64/`objccall` equivalent doesn't exist yet. |
+| **`ide`** | Turns a `winkb` query into renderable markdown cards. Unmodified from WRASM — still Win32-only content. |
+| ~~`studio`~~ | Removed from the workspace (Windows-only Direct2D dependency). Not built. |
 
 ## Build & test
 
 ```sh
-cargo build            # rasm + winkb + was + ide
-cargo test -p rasm     # encoder unit tests + the 5,109-golden corpus gate
-cargo test -p was      # the front-end: macros, proc contracts, the checks
+cargo build            # rasm + winkb + was + ide + mackb — builds clean on macOS arm64, no LLVM needed
+cargo test              # both encoders' corpus gates (x86-64: 5,116 forms; AArch64: 1,181 forms), mackb, was, winkb, ide
+
+# The LLVM-MC differential oracle (build/test-time only — nothing on the shipping
+# path depends on it). Needs Homebrew LLVM: `brew install llvm`.
+cargo test --features llvm
 ```
 
-`studio` additionally needs **WF66**'s `docpane` (the shared Direct2D /
-DirectWrite render core) checked out at `../WF66` relative to this repo:
+### The knowledge databases
 
-```sh
-cargo build --workspace      # everything, including studio (needs ../WF66)
-cargo test  --workspace
-```
-
-### The knowledge database
-
-`winkb` reads `windows_api.db` — a SQLite database derived from the Win32
-metadata (not committed here; it's large). Point `winkb`/`was`/`studio` at it
-with `$WINKB_DB`, defaulting to `E:\windows_api\windows_api.db`.
+- `winkb` reads `windows_api.db` (not committed; large). `$WINKB_DB`, default
+  `E:\windows_api\windows_api.db` — a Windows-era default; irrelevant unless
+  you're exercising the Win64 side on this checkout.
+- `mackb` reads `cocoa.sqlite`, from the sibling `cocoa_data` repo.
+  `$COCOA_DATA_DB`, default `../../../cocoa_data/cocoa.sqlite` relative to the
+  crate (i.e. `cocoa_data` checked out next to `MRASM`). Missing DB degrades
+  gracefully — every lookup returns `None` rather than failing the build.
 
 ## Try it
 
-```sh
-# A self-contained exe with no toolchain — exits 42:
-printf '.globl main\nmain:\n  invoke ExitProcess, 42\n  ret\n' > hi.was
-cargo run -p was -- hi.was -o hi.exe && ./hi.exe; echo $?
+The one thing that runs end to end today is: AArch64 assembly text in, a
+signed, runnable macOS executable out, with **zero external tools**.
 
-# Ask the knowledge base things:
-cargo run -p winkb --bin winkb -- show CreateFileW
-cargo run -p ide   --bin ide-card -- RECT        # a struct card
-cargo run -p ide   --bin ide-card -- rcx         # register / ABI card
-cargo run -p ide   --bin ide-card -- proc        # the subroutine convention
-cargo run -p was   --bin was -- hi.was --check   # live checks (incl. the contracts)
+```sh
+cargo test --test macho_exe_run42 -- --nocapture
 ```
 
-## Demos
+Or by hand, through the library directly:
 
-The `examples/` corpus is the assembler's proving ground — each a hand-written
-`.was` you can build and run:
+```rust
+use rasm::{A64Encoder, Encoder, write_macho_exe};
 
-| demo | what it shows |
-|---|---|
-| `fbwin`, `mandel`, `julia`, `life`, `plasma`, `fire`, `tunnel`, `starfield`, `metaballs`, `rotozoomer` | CPU framebuffers blitted via GDI |
-| `mandel_gpu` / `mandel_gpu_proc` | a D3D11 **shader** Mandelbrot (HLSL via `.ASCIISTRING` + `D3DCompile`) with rubber-band zoom; the `_proc` version is 512 bytes smaller via a `frame` proc |
-| `d2d_balls` | a **Direct2D** fountain of spinning, translucent, outlined marbles (SSE physics, the COM macros, float→`xmm`) |
-| `gamescanvas` | the start of a retro **indexed-colour game canvas** (320×200 palette framebuffer, 5×7 font via `.include`, palette cycling) |
+let m = A64Encoder.encode(".globl _main\n_main:\n  movz w0, #42\n  ret\n")?;
+let exe = write_macho_exe(&m, "_main")?;
+std::fs::write("hi", &exe)?;
+// chmod +x hi && ./hi; echo $?   ->  42
+```
+
+Ask the macOS knowledge base things:
+
+```sh
+cargo run -p mackb --bin mackb -- method NSView frame     # -> ret=h4 args=[]  (an HFA NSRect)
+cargo run -p mackb --bin mackb -- struct CGRect            # -> field names + byte offsets
+cargo run -p mackb --bin mackb -- function CGRectMake       # -> framework + raw @encode signature
+```
+
+Everything under `was`/`winkb`/`ide` still targets Windows — those crates
+build and their tests pass on macOS (LLVM cross-assembles fine for the
+differential-oracle tests), but their *output* (COFF objects, PE executables)
+isn't something you'd run on this machine. They're inherited, working, and
+untouched, not yet superseded.
+
+## Inherited from WRASM, not yet re-verified on macOS
+
+`docs/`, `examples/`, `gpu/`, `library/`, `projects/` and `release/` are
+carried over from WRASM as-is — design docs and a large `.was` demo corpus
+(GDI framebuffers, a D3D11 shader Mandelbrot, a Direct2D particle fountain),
+all written against Win32/COM. None of it has been touched for this port; it
+documents where the *authoring layer* (macros, contracts, checks) needs to
+land once AAPCS64/`objccall` exist, not where MRASM is today.
+
+## Lineage
+
+- **[WRASM](https://github.com/albanread/WRASM)** — the Windows original this
+  is a port of; the x86-64 encoder, COFF/PE writers, and the whole `was`
+  authoring-layer design are its work, carried over verbatim where not yet
+  ported.
+- **[JASM](https://github.com/albanread/JASM)** — source of the AArch64
+  encoder (`A64Encoder`) and its corpus-gate methodology.
+- **MF67** (an Objective-Forth sibling project) — source of the
+  `objc_msgSend` register-marshaling design (`objc.masm`, `synth_send_thunk`)
+  that MRASM's future `objccall` macro will implement.
+- **cocoa_data** — the shared SQLite mirror of the macOS Objective-C surface
+  (built once, queried by every native-macOS project in this portfolio) that
+  `mackb` reads.
 
 ## License
 
