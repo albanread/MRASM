@@ -4,7 +4,7 @@
 //! same read-only-connection, resolve-by-query shape, but sourced from the
 //! Obj-C runtime + BridgeSupport instead of Win32 metadata.
 //!
-//! Three tables matter to an assembler:
+//! Five tables matter to an assembler:
 //! * `method_abi` — for every `(class, selector, is_class)` Objective-C method,
 //!   the ALREADY-COMPUTED AAPCS64 register shape: a return token and one token
 //!   per argument (`g` gpr/id, `f` fp/double, `h1..h4` HFA, `i1`/`i2` small
@@ -12,8 +12,14 @@
 //!   drives `objccall`'s register marshaling — see the send-synthesizer
 //!   algorithm recorded in the `mrasm-port` design notes (ported from MF67's
 //!   `src/objc.rs`/`src/session.rs`).
-//! * `bs_functions`/`bs_function_args` — plain C (POSIX/framework) function
+//! * `bs_functions`/`bs_function_args` — plain C (framework) function
 //!   signatures as raw `@encode` type tokens, for `invoke`.
+//! * `posix_functions`/`posix_function_args`/`posix_function_abi` — a curated
+//!   POSIX/BSD libc surface `bs_functions` doesn't cover (BridgeSupport is a
+//!   Cocoa-bridging format, never meant for `malloc`/`open`/`read`/…), ingested
+//!   straight from clang's AST over the live SDK headers (`ingest_posix.py`),
+//!   with an AAPCS64 classification (`derive_posix_abi.py`) in the SAME token
+//!   vocabulary as `method_abi` — see [`posix_abi`](MacKb::posix_abi).
 //! * `structs`/`struct_fields` — resolved struct layouts (member names + byte
 //!   offsets), for `sizeof`/`Struct.field` the way winkb serves `RECT.right`.
 //!
@@ -55,6 +61,32 @@ pub struct CFunction {
     pub name: String,
     pub framework: Option<String>,
     pub ret_type: String,
+    pub arg_types: Vec<String>,
+}
+
+/// A curated POSIX/BSD libc function's signature, from `posix_functions`/
+/// `posix_function_args` — plain C type strings exactly as clang reports them
+/// (`"const char *"`, `"size_t"`, …), NOT `@encode` tokens like [`CFunction`]
+/// uses (a different source, a different type-string convention — kept
+/// separate rather than merged into one ambiguous representation). For
+/// register-marshaling purposes use [`MacKb::posix_abi`] instead, which gives
+/// the already-classified g/f/i1/i2/v tokens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PosixFunction {
+    pub name: String,
+    /// The canonical header this function is declared in, e.g. `"unistd.h"`
+    /// — a curation choice (see `ingest_posix.py`), not a clang fact.
+    pub header: String,
+    /// Best-effort return type for display. A function that itself returns a
+    /// function pointer (POSIX has exactly one in the curated set: `signal`)
+    /// can't be sliced out of the full type string by paren-depth alone; such
+    /// cases carry the literal string `"<complex declarator, see qualtype>"`
+    /// here — `qualtype` always has the real signature regardless.
+    pub ret_type: String,
+    /// The full function type exactly as clang's `qualType` reports it, e.g.
+    /// `"ssize_t (int, void *, size_t)"`.
+    pub qualtype: String,
+    pub variadic: bool,
     pub arg_types: Vec<String>,
 }
 
@@ -236,6 +268,57 @@ impl MacKb {
         Ok(Some(CFunction { name: name.to_string(), framework, ret_type, arg_types }))
     }
 
+    /// A curated POSIX/BSD libc function's signature (plain C types, for
+    /// display/diagnostics). `name` must match `posix_functions.name`
+    /// exactly. `bs_functions` covers framework C APIs but not bare libc —
+    /// try [`function`](MacKb::function) first if the name might be either.
+    pub fn posix_function(&self, name: &str) -> Result<Option<PosixFunction>> {
+        let Some(conn) = self.conn.as_ref() else { return Ok(None) };
+        let row: Option<(String, String, String, i64)> = conn
+            .query_row(
+                "SELECT header, ret_type, qualtype, variadic FROM posix_functions WHERE name=?1",
+                rusqlite::params![name],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .ok();
+        let Some((header, ret_type, qualtype, variadic)) = row else { return Ok(None) };
+        let mut stmt =
+            conn.prepare("SELECT type FROM posix_function_args WHERE name=?1 ORDER BY idx")?;
+        let arg_types: Vec<String> =
+            stmt.query_map(rusqlite::params![name], |r| r.get(0))?.filter_map(Result::ok).collect();
+        Ok(Some(PosixFunction {
+            name: name.to_string(),
+            header,
+            ret_type,
+            qualtype,
+            variadic: variadic != 0,
+            arg_types,
+        }))
+    }
+
+    /// A curated POSIX/BSD libc function's AAPCS64 register shape, from
+    /// `posix_function_abi` — the SAME token vocabulary and [`MethodAbi`]
+    /// shape as [`method_abi_exact`](MacKb::method_abi_exact), so a consumer
+    /// (`invoke`/`objccall`) marshals a libc call and a Cocoa send with one
+    /// code path. `name` must match `posix_functions.name` exactly.
+    pub fn posix_abi(&self, name: &str) -> Option<MethodAbi> {
+        let key = format!("#{name}");
+        if let Some(hit) = self.method_abi_cache.borrow().get(&key) {
+            return hit.clone();
+        }
+        let conn = self.conn.as_ref()?;
+        let row: Option<(String, String)> = conn
+            .query_row(
+                "SELECT ret_class, arg_classes FROM posix_function_abi WHERE name=?1",
+                rusqlite::params![name],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .ok();
+        let resolved = row.map(|(ret, args)| MethodAbi { ret, args: Self::split_args(&args) });
+        self.method_abi_cache.borrow_mut().insert(key, resolved.clone());
+        resolved
+    }
+
     /// A resolved struct layout (member names + byte offsets), e.g. `CGRect`,
     /// `CMTime`. `name` must match `structs.name` exactly.
     pub fn struct_layout(&self, name: &str) -> Result<Option<StructLayout>> {
@@ -315,5 +398,46 @@ mod tests {
         if let Some(f) = kb.function("printf").unwrap() {
             assert!(!f.arg_types.is_empty(), "printf: {f:?}");
         }
+    }
+
+    #[test]
+    fn real_db_resolves_posix_functions() {
+        if !std::path::Path::new(&db_path()).exists() {
+            eprintln!("skipping: cocoa.sqlite not found at {}", db_path());
+            return;
+        }
+        let kb = MacKb::load();
+
+        // bs_functions (BridgeSupport, framework-only) doesn't cover bare libc —
+        // the whole reason posix_functions exists.
+        assert!(kb.function("malloc").unwrap().is_none(), "malloc unexpectedly in bs_functions");
+
+        let read = kb.posix_function("read").unwrap().expect("read");
+        assert_eq!(read.header, "unistd.h");
+        assert_eq!(read.ret_type, "ssize_t");
+        assert_eq!(read.arg_types, vec!["int", "void *", "size_t"]);
+        assert!(!read.variadic);
+        let read_abi = kb.posix_abi("read").expect("read abi");
+        assert_eq!(read_abi.ret, "g");
+        assert_eq!(read_abi.args, vec!["g", "g", "g"]);
+
+        let open = kb.posix_function("open").unwrap().expect("open");
+        assert!(open.variadic);
+
+        // div_t/ldiv_t: the two struct-by-value returns in the curated set —
+        // confirmed by a compiled sizeof probe (see derive_posix_abi.py), not
+        // guessed: div_t=8 bytes->i1 (one GPR), ldiv_t=16 bytes->i2 (two GPRs).
+        assert_eq!(kb.posix_abi("div").unwrap().ret, "i1");
+        assert_eq!(kb.posix_abi("ldiv").unwrap().ret, "i2");
+
+        // signal: the one function-pointer-returning POSIX function in the set —
+        // ret_type can't be sliced out syntactically (see PosixFunction docs),
+        // but the ABI classifier still correctly calls it a pointer (one GPR).
+        let signal = kb.posix_function("signal").unwrap().expect("signal");
+        assert_eq!(signal.ret_type, "<complex declarator, see qualtype>");
+        assert_eq!(kb.posix_abi("signal").unwrap().ret, "g");
+
+        assert!(kb.posix_function("not_a_real_function").unwrap().is_none());
+        assert!(kb.posix_abi("not_a_real_function").is_none());
     }
 }

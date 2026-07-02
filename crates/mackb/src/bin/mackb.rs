@@ -4,6 +4,7 @@
 //!   mackb method <Class> <selector> [class]   exact method ABI shape
 //!   mackb method <selector> <arity>            by-name method ABI shape + ambiguity
 //!   mackb function <name>                      C function signature (framework APIs)
+//!   mackb posix <name>                         POSIX/libc signature + AAPCS64 ABI shape
 //!   mackb struct <Name>                        struct layout (fields + byte offsets)
 //!
 //! DB path: $COCOA_DATA_DB, else `<crate>/../../../cocoa_data/cocoa.sqlite`.
@@ -57,6 +58,18 @@ fn run() -> anyhow::Result<()> {
             ),
             None => println!("'{name}': not found (bs_functions covers framework C APIs, not bare POSIX/libc)"),
         },
+        (Some("posix"), Some(name), _) => match kb.posix_function(name)? {
+            Some(f) => {
+                let variadic = if f.variadic { ", variadic" } else { "" };
+                println!("{name} ({}{variadic}) -> {}", f.header, f.qualtype);
+                if let Some(abi) = kb.posix_abi(name) {
+                    println!("  ABI: ret={} args={:?}", abi.ret, abi.args);
+                }
+            }
+            None => println!(
+                "'{name}': not found (curated POSIX/BSD surface only — see ingest_posix.py; try `mackb function` for framework C APIs)"
+            ),
+        },
         (Some("struct"), Some(name), _) => match kb.struct_layout(name)? {
             Some(s) => {
                 println!("{name} ({} bytes, align {})", s.size, s.align);
@@ -68,7 +81,7 @@ fn run() -> anyhow::Result<()> {
         },
         _ => {
             eprintln!(
-                "usage:\n  mackb method <Class> <selector> [class]\n  mackb method <selector> <arity>\n  mackb function <name>\n  mackb struct <Name>"
+                "usage:\n  mackb method <Class> <selector> [class]\n  mackb method <selector> <arity>\n  mackb function <name>\n  mackb posix <name>\n  mackb struct <Name>"
             );
             return Ok(());
         }
