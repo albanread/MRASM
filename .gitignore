@@ -1,5 +1,8 @@
 /target
 
+# macOS Finder metadata
+.DS_Store
+
 # packaged release folder (binaries + 86 MB knowledge DB + zip; output, not source)
 /release/
 
